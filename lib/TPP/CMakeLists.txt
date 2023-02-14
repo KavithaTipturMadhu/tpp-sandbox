@@ -18,6 +18,7 @@ add_mlir_library(MLIRTPP
     ConvInitSimplify.cpp
     ConvertForAllToParallelOp.cpp
     CombineTpp.cpp
+    DecomposeLinalgOpsPass.cpp
 
   # Utils
     TensorInit.cpp
