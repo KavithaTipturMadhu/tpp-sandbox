@@ -275,6 +275,65 @@ struct ConvertTppVNNIBrgemmOp : public OpRewritePattern<tpp::VNNIBrgemmOp> {
   }
 };
 
+struct ConvertTppFusedVNNIBrgemmOp
+    : public OpRewritePattern<tpp::FusedVNNIBrgemmOp> {
+  using OpRewritePattern<tpp::FusedVNNIBrgemmOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(tpp::FusedVNNIBrgemmOp brgemmOp,
+                                PatternRewriter &rewriter) const override {
+    Location loc = brgemmOp.getLoc();
+
+    MemRefType memrefC = brgemmOp.getMatrixCType();
+    MemRefType memrefA = brgemmOp.getBatchMatrixAType();
+    MemRefType memrefB = brgemmOp.getBatchMatrixBType();
+    int64_t m = memrefC.getShape()[0];
+    int64_t n = memrefC.getShape()[1];
+    int64_t k = memrefA.getShape()[2];
+    int64_t batchSize = memrefB.getShape()[0];
+
+    auto ldaDim = getLeadingDim(memrefA, 1);
+    if (failed(ldaDim))
+      return rewriter.notifyMatchFailure(brgemmOp, "Cannot compute lda");
+    int64_t lda = *ldaDim;
+
+    auto ldbDim = getLeadingDim(memrefB, 1);
+    if (failed(ldbDim))
+      return rewriter.notifyMatchFailure(brgemmOp, "Cannot compute ldb");
+    int64_t ldb = *ldbDim;
+    auto divLdbDim = getLeadingDim(memrefB, 2);
+    if (failed(divLdbDim))
+      return rewriter.notifyMatchFailure(brgemmOp, "Cannot compute ldb");
+    ldb = ldb / (*divLdbDim);
+
+    auto ldcDim = getLeadingDim(memrefC);
+    if (failed(ldcDim))
+      return rewriter.notifyMatchFailure(brgemmOp, "Cannot compute ldc");
+    int64_t ldc = *ldcDim;
+
+    IntegerType integer64 = IntegerType::get(rewriter.getContext(), 64);
+    DenseI64ArrayAttr dims = DenseI64ArrayAttr::get(
+        rewriter.getContext(), ArrayRef<int64_t>{m, n, k, lda, ldb, ldc});
+    xsmm::QuarternaryKindAttr attr = xsmm::QuarternaryKindAttr::get(
+        brgemmOp.getContext(), xsmm::QuarternaryKind::FUSED_BRGEMM);
+    xsmm::DataTypeAttr dtype =
+        xsmm::DataTypeAttr::get(brgemmOp.getContext(), xsmm::DataType::BF16);
+
+    Value dispatched = rewriter.create<xsmm::QuarternaryDispatchOp>(
+        loc, integer64, attr, dims, dtype,
+        BoolAttr::get(brgemmOp.getContext(), true));
+    Value batchDim = rewriter.create<arith::ConstantOp>(
+        loc, integer64, rewriter.getIntegerAttr(integer64, batchSize));
+    SmallVector<Value, 7> invokeOperands;
+    invokeOperands.push_back(dispatched);
+    invokeOperands.append(brgemmOp->getOperands().begin(),
+                          brgemmOp->getOperands().end());
+    invokeOperands.push_back(batchDim);
+    rewriter.replaceOpWithNewOp<xsmm::QuarternaryOp>(brgemmOp, dtype, attr,
+                                                     invokeOperands);
+    return success();
+  }
+};
+
 struct ConvertTppIdentityOp : public OpRewritePattern<tpp::IdentityOp> {
   using OpRewritePattern<tpp::IdentityOp>::OpRewritePattern;
 
@@ -550,7 +609,8 @@ struct ConvertTppToXsmm : public ConvertTppToXsmmBase<ConvertTppToXsmm> {
 void mlir::tpp::populateTppToXsmmPatterns(RewritePatternSet &patterns) {
   patterns.add<ConvertTppIdentityOp, ConvertTppReluOp, ConvertTppAddOp,
                ConvertTppMatmulOp, ConvertTppVNNIMatmulOp, ConvertTppBrgemmOp,
-               ConvertTppVNNIBrgemmOp>(patterns.getContext());
+               ConvertTppVNNIBrgemmOp, ConvertTppFusedVNNIBrgemmOp>(
+      patterns.getContext());
 }
 
 std::unique_ptr<OperationPass<func::FuncOp>>
