@@ -446,11 +446,11 @@ packMatmulOpImpl(RewriterBase &rewriter, linalg::MatmulOp matmulOp,
 
 bool isVNNIPacked(linalg::GenericOp matmulOp) {
   // TODO add VNNI packing checks here
-  auto indexingMap = matmulOp.getIndexingMapsArray()[1];
   auto inputRank =
       matmulOp.getInputs()[1].getType().cast<ShapedType>().getRank();
-  return (inputRank == 5 && indexingMap.getNumDims() == 7) ||
-         (inputRank == 4 && indexingMap.getNumDims() == 5);
+  auto otherInputRank = 
+      matmulOp.getInputs()[0].getType().cast<ShapedType>().getRank();
+  return (inputRank == otherInputRank + 1);
 }
 
 bool isMatmulOp(linalg::GenericOp matmulOp) {
@@ -511,7 +511,7 @@ mlir::linalgx::packVNNIMatmulOp(RewriterBase &rewriter,
   Value packedMatrixB =
       toPackLayout_VNNI(rewriter, loc, matmulOp.getInputs()[1], tilesOnB);
   MLIRContext *ctx = matmulOp.getContext();
-  AffineExpr p1, p2, r1, p3, p4, r2, r3;
+  AffineExpr r1, p3, p4, r2, r3;
   SmallVector<Value> packedInputs = {matmulOp.getInputs()[0], packedMatrixB};
   int64_t dims;
   AffineMap mapA, mapB, mapC;
@@ -522,45 +522,38 @@ mlir::linalgx::packVNNIMatmulOp(RewriterBase &rewriter,
   // everytime the tensor shape increases by some size. The base case
   // is the same i.e., [r, r, p, p, r] iterators to be set to the innerost
   // loops.
-  if (matmulOp.getInputs()[1].getType().cast<ShapedType>().getRank() == 4) {
-    dims = 7;
-    bindDims(ctx, p1, p2, r1, r3, p3, p4, r2);
-    mapA = AffineMap::get(dims, /*symbols=*/0, {p1, r1, p3, r2}, ctx);
-    mapB = AffineMap::get(dims, /*symbols=*/0,
-                          {p2, r1, r2.floorDiv(*blockingFactor), p4, r3}, ctx);
-    mapC = AffineMap::get(dims, /*symbols=*/0, {p1, p2, p3, p4}, ctx);
-    replacementOp = rewriter.create<linalg::GenericOp>(
-        loc, matrixC.getType(), packedInputs, ValueRange{matrixC},
-        ArrayRef<AffineMap>{mapA, mapB, mapC},
-        ArrayRef<mlir::utils::IteratorType>{
-            mlir::utils::IteratorType::parallel,
-            mlir::utils::IteratorType::parallel,
-            mlir::utils::IteratorType::reduction,
-            mlir::utils::IteratorType::reduction,
-            mlir::utils::IteratorType::parallel,
-            mlir::utils::IteratorType::parallel,
-            mlir::utils::IteratorType::reduction},
-        /*doc=*/"", /*libraryCall=*/"");
-
-  } else {
-    assert(matmulOp.getInputs()[1].getType().cast<ShapedType>().getRank() == 3);
-    dims = 5;
+    int parallelDims = matmulOp.getIndexingMapsArray()[0].getNumDims() - 5;
+    AffineExpr parallelExpr[parallelDims]; 
     bindDims(ctx, r1, r3, p3, p4, r2);
-    mapA = AffineMap::get(dims, /*symbols=*/0, {r1, p3, r2}, ctx);
-    mapB = AffineMap::get(dims, /*symbols=*/0,
-                          {r1, r2.floorDiv(*blockingFactor), p4, r3}, ctx);
-    mapC = AffineMap::get(dims, /*symbols=*/0, {p3, p4}, ctx);
+    mapA = AffineMap::get(5, 0, {r1, p3, r2}, ctx);
+    mapB = AffineMap::get(5, 0, {r1, r2.floorDiv(*blockingFactor), p4, r3}, ctx);
+    mapC = AffineMap::get(5, 0, {p3, p4}, ctx);
+ 
+    SmallVector<mlir::utils::IteratorType> iterators;
+    for(int i= 0; i<parallelDims;i++){
+        mapA = mapA.shiftDims(1, 0);//iterators.size());
+        mapA = mapA.insertResult(Builder(mapA.getContext()).getAffineDimExpr(0),
+                           0);
+	mapB = mapB.shiftDims(1, 0);//iterators.size());
+        mapB = mapB.insertResult(Builder(mapB.getContext()).getAffineDimExpr(0),
+                           0);
+        mapC = mapC.shiftDims(1, 0);//iterators.size());
+        mapC = mapC.insertResult(Builder(mapA.getContext()).getAffineDimExpr(0),
+                           0);
+	iterators.push_back(mlir::utils::IteratorType::parallel);
+
+    }
+    iterators.push_back(mlir::utils::IteratorType::reduction);
+    iterators.push_back(mlir::utils::IteratorType::reduction);
+    iterators.push_back(mlir::utils::IteratorType::parallel);
+    iterators.push_back(mlir::utils::IteratorType::parallel);
+    iterators.push_back(mlir::utils::IteratorType::reduction);
+
     replacementOp = rewriter.create<linalg::GenericOp>(
         loc, matrixC.getType(), packedInputs, ValueRange{matrixC},
         ArrayRef<AffineMap>{mapA, mapB, mapC},
-        ArrayRef<mlir::utils::IteratorType>{
-            mlir::utils::IteratorType::reduction,
-            mlir::utils::IteratorType::reduction,
-            mlir::utils::IteratorType::parallel,
-            mlir::utils::IteratorType::parallel,
-            mlir::utils::IteratorType::reduction},
+        iterators,
         /*doc=*/"", /*libraryCall=*/"");
-  }
   rewriter.inlineRegionBefore(matmulOp.getRegion(), replacementOp.getRegion(),
                               replacementOp.getRegion().begin());
 
