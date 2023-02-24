@@ -381,8 +381,8 @@ extern "C" void _mlir_ciface_xsmm_fused_brgemm_invoke(
     float *addr_tensorD = (float *)tensorD.data + tensorD.offset;
     gemm_param.a.primary = (void *)addr_tensorB;
     gemm_param.b.primary = (void *)addr_tensorA;
-    gemm_param.c.primary = (void *)addr_tensorC;
-    gemm_param.d.primary = (void *)addr_tensorD;
+    gemm_param.c.primary = (void *)addr_tensorD;
+    gemm_param.d.primary = (void *)addr_tensorC;
   } else if (dType == LIBXSMM_DATATYPE_BF16) {
     bf16 *addr_tensorA = (bf16 *)tensorA.data + tensorA.offset;
     bf16 *addr_tensorB = (bf16 *)tensorB.data + tensorB.offset;
@@ -390,8 +390,8 @@ extern "C" void _mlir_ciface_xsmm_fused_brgemm_invoke(
     bf16 *addr_tensorD = (bf16 *)tensorD.data + tensorD.offset;
     gemm_param.a.primary = (void *)addr_tensorB;
     gemm_param.b.primary = (void *)addr_tensorA;
-    gemm_param.c.primary = (void *)addr_tensorC;
-    gemm_param.d.primary = (void *)addr_tensorD;
+    gemm_param.c.primary = (void *)addr_tensorD;
+    gemm_param.d.primary = (void *)addr_tensorC;
   }
   gemm_param.op.tertiary = (void *)&numBatchesVar;
   sgemm.gemm_ext(&gemm_param);
@@ -423,9 +423,9 @@ extern "C" int64_t _mlir_ciface_xsmm_fused_brgemm_dispatch(
   libxsmm_bitfield l_flags;
   if (isVNNI) {
     assert(dtype == LIBXSMM_DATATYPE_BF16);
-    l_flags = LIBXSMM_GEMM_VNNI_FLAGS('N', 'N', 'V', 'N');
+    l_flags = LIBXSMM_GEMM_VNNI_FLAGS('N', 'N', 'V', 'N') | LIBXSMM_GEMM_FLAG_BETA_0;
   } else {
-    l_flags = LIBXSMM_GEMM_FLAGS('N', 'N');
+    l_flags = LIBXSMM_GEMM_FLAGS('N', 'N') | LIBXSMM_GEMM_FLAG_BETA_0;
   }
   libxsmm_bitfield l_prefetch_flags = 0;
 
