@@ -33,7 +33,7 @@
 #include "TPP/Dialect/Perf/PerfOps.h"
 #include "TPP/Passes.h"
 #include "mlir/Transforms/Passes.h"
-
+#include "TPP/TensorInit.h"
 using namespace mlir;
 
 MLIRBench::MLIRBench(mlir::Operation *op, const MLIRBenchConfig &config)
