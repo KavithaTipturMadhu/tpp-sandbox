@@ -387,7 +387,7 @@ LogicalResult MLIRBench::finalize(PrintStage print) {
   passManager.addNestedPass<func::FuncOp>(vector::createVectorBufferizePass());
   passManager.addNestedPass<func::FuncOp>(createLinalgBufferizePass());
   
-    
+   
   // Partial Lowering
   passManager.addPass(memref::createExpandStridedMetadataPass());
   passManager.addPass(createLowerAffinePass());
@@ -395,11 +395,11 @@ LogicalResult MLIRBench::finalize(PrintStage print) {
   passManager.addPass(tpp::createConvertPerfToFuncPass());
   passManager.addPass(createConvertTensorToLinalgPass());
   passManager.addNestedPass<func::FuncOp>(createConvertLinalgToLoopsPass());
-  passManager.addPass(createConvertSCFToOpenMPPass());
-  passManager.addPass(createConvertOpenMPToLLVMPass());
   passManager.addPass(arith::createArithExpandOpsPass());
   passManager.addPass(createConvertVectorToSCFPass());
   passManager.addPass(createConvertSCFToCFPass());
+  passManager.addPass(createConvertSCFToOpenMPPass());
+  passManager.addPass(createConvertOpenMPToLLVMPass());
   
 
   // Print IR of optimized kernel and main
@@ -407,7 +407,6 @@ LogicalResult MLIRBench::finalize(PrintStage print) {
     passManager.addPass(createPrintIRPass());
 
   // Lower to LLVM
-  passManager.addPass(createConvertControlFlowToLLVMPass());
   passManager.addPass(createConvertVectorToLLVMPass());
   passManager.addPass(createConvertFuncToLLVMPass());
   passManager.addPass(createFinalizeMemRefToLLVMConversionPass());
