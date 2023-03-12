@@ -33,6 +33,39 @@ using namespace mlir;
 
 namespace {
 
+struct ReplaceIterArgs : public OpRewritePattern<scf::ForOp> {
+  using OpRewritePattern<scf::ForOp>::OpRewritePattern;
+
+  void replaceIterArgs(PatternRewriter &rewriter, scf::ForOp outerFor,
+                       scf::ForOp innerFor) const {
+    assert(outerFor.getNumIterOperands() == innerFor.getNumIterOperands() &&
+           "expect same number of iter args");
+    Block *block = &(*innerFor.getRegion().begin());
+    for (auto it :
+         llvm::zip(outerFor.getIterOperands(), innerFor.getRegionIterArgs())) {
+      Value source = std::get<0>(it);
+      Value target = std::get<1>(it);
+      rewriter.replaceUsesWithIf(source, target, [&](OpOperand &use) {
+        return use.getOwner()->getBlock() == block;
+      });
+    }
+  }
+
+  LogicalResult matchAndRewrite(scf::ForOp forOp,
+                                PatternRewriter &rewriter) const override {
+    auto metadata = forOp->getAttrOfType<StringAttr>("fusion");
+    if (!metadata || metadata.getValue() != "root")
+      return failure();
+    if (forOp.getNumRegionIterArgs() != 1)
+      return failure();
+    SmallVector<scf::ForOp> nestedLoops;
+    getPerfectlyNestedLoops(nestedLoops, forOp);
+    replaceIterArgs(rewriter, forOp, nestedLoops[nestedLoops.size() - 1]);
+    return success();
+  }
+};
+
+
 // Convert scf.for to scf.forall after fusion.
 struct ConvertToForAll : public OpRewritePattern<scf::ForOp> {
   using OpRewritePattern<scf::ForOp>::OpRewritePattern;
@@ -644,6 +677,9 @@ struct TileConsumerAndFuseProducers
     RewritePatternSet patterns(&getContext());
     if (this->useForAll)
       patterns.add<ConvertToForAll>(&getContext());
+    // Pattern to replace iter args of the outer most loop with region args of
+    // the inner most one.
+    patterns.add<ReplaceIterArgs>(&getContext());
     // fold unit-extent dims for linalg on tensors.
     linalg::populateFoldUnitExtentDimsViaSlicesPatterns(patterns);
     tensor::populateMergeConsecutiveInsertExtractSlicePatterns(patterns);
