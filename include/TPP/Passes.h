@@ -147,6 +147,7 @@ std::unique_ptr<OperationPass<ModuleOp>>
 createDefaultPipelinePass(StringRef gpuBackend = "");
 
 // Testing passes.
+std::unique_ptr<OperationPass<func::FuncOp>> createConvertTppPackUnpack();
 void registerTestStructuralMatchers();
 void registerTestForToForAllRewrite();
 

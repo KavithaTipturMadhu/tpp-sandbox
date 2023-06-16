@@ -446,4 +446,12 @@ def DefaultPipeline : Pass<"default-pipeline", "ModuleOp"> {
   ];
 }
 
+def ConvertTppToIdentity: Pass<"tpp-to-identity", "func::FuncOp"> {
+  let summary = "Lower TPP transpose to tpp identity";
+  let description = [{
+    Convert tpp transpose operations to tpp identity loops.
+  }];
+  let constructor = "mlir::tpp::createConvertTppPackUnpack()";
+}
+
 #endif // TPP_DIALECT_TPP_PASSES
