@@ -30,7 +30,8 @@ typedef struct MatchResult {
   int index;
 } MatchResult;
 
-SmallVector<MatchResult> innerDimMatchesIndex(tensor::PackOp packOp) {
+template <typename PackOp>
+SmallVector<MatchResult> innerDimMatchesIndex(PackOp packOp) {
   SmallVector<MatchResult> result;
   int innerTiles = 0;
   for (size_t i = 0; i < packOp.getSource().getType().getShape().size(); i++) {
@@ -56,7 +57,6 @@ SmallVector<MatchResult> innerDimMatchesIndex(tensor::PackOp packOp) {
   }
   return result;
 }
-
 struct ConvertTppPackOp : public OpRewritePattern<tensor::PackOp> {
   using OpRewritePattern<tensor::PackOp>::OpRewritePattern;
   LogicalResult matchAndRewrite(tensor::PackOp packOp,
@@ -191,9 +191,141 @@ struct ConvertTppPackOp : public OpRewritePattern<tensor::PackOp> {
   }
 };
 
+struct ConvertTppUnpackOp : public OpRewritePattern<tensor::UnPackOp> {
+  using OpRewritePattern<tensor::UnPackOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(tensor::UnPackOp unpackOp,
+                                PatternRewriter &rewriter) const override {
+    if (unpackOp.getStaticInnerTiles().size() > 0) {
+      int numLoops = unpackOp.getDest().getType().getShape().size();
+
+      SmallVector<MatchResult> haveMatched = innerDimMatchesIndex(unpackOp);
+      for (int i = 0; i < numLoops; i++) {
+        if (haveMatched[i].haveMatch) {
+          if (unpackOp.getDest().getType().getShape()[i] <
+              unpackOp.getStaticInnerTiles()[haveMatched[i].index]) {
+            return failure();
+          }
+        }
+      }
+
+      auto zero = getConstIndex(rewriter, 0);
+      auto one = getConstIndex(rewriter, 1);
+
+      SmallVector<Value> lbs;
+      SmallVector<Value> ubs;
+      SmallVector<Value> steps;
+
+      for (int i = 0; i < numLoops; i++) {
+        lbs.push_back(zero);
+        steps.push_back(one);
+      }
+
+      for (int i = 0; i < numLoops; i++) {
+        if (haveMatched[i].haveMatch) {
+          ubs.push_back(getConstIndex(
+              rewriter,
+              unpackOp.getDest().getType().getShape()[i] /
+                  unpackOp.getStaticInnerTiles()[haveMatched[i].index]));
+
+        } else {
+          ubs.push_back(getConstIndex(
+              rewriter, unpackOp.getDest().getType().getShape()[i]));
+        }
+      }
+      Value pos;
+
+      SmallVector<Value> reduc = {
+          unpackOp.getDest(),
+      };
+
+      auto bodyBuilder = [&](OpBuilder &builder, Location, Value iv,
+                             MutableArrayRef<Value> reduc) {};
+
+      auto loopNest = mlir::scf::buildLoopNest(
+          rewriter, unpackOp.getLoc(), lbs, ubs, steps, reduc,
+          [&reduc, &pos, bodyBuilder, &unpackOp,
+           &numLoops](OpBuilder &rewriter, Location loc, ValueRange localIvs,
+                      ValueRange iterArgs) -> scf::ValueVector {
+            reduc.assign(iterArgs.begin(), iterArgs.end());
+
+            SmallVector<OpFoldResult> offsets;
+            SmallVector<MatchResult> haveMatched = innerDimMatchesIndex(unpackOp);
+            for (int i = 0; i < numLoops; i++) {
+
+              if (haveMatched[i].haveMatch) {
+                Value muliOp = rewriter.create<arith::MulIOp>(
+                    loc, localIvs[i],
+                    getConstIndex(
+                        rewriter,
+                        unpackOp.getStaticInnerTiles()[haveMatched[i].index]));
+                offsets.push_back(muliOp);
+              } else {
+                offsets.push_back(localIvs[i]);
+              }
+            }
+            SmallVector<OpFoldResult> strides;
+            for (int i = 0; i < numLoops; i++) {
+              strides.push_back(rewriter.getIndexAttr(1));
+            }
+
+            SmallVector<OpFoldResult> sizes;
+
+            for (int i = 0; i < numLoops; i++) {
+              if (haveMatched[i].haveMatch) {
+                sizes.push_back(rewriter.getIndexAttr(
+                    unpackOp.getStaticInnerTiles()[haveMatched[i].index]));
+              } else {
+                sizes.push_back(rewriter.getIndexAttr(1));
+              }
+            }
+            SmallVector<OpFoldResult> extractSliceOffsets;
+            for (int i = 0; i < numLoops; i++) {
+              int indirection = i;
+              if (unpackOp.getOuterDimsPerm().size() > 0) {
+                indirection = unpackOp.getOuterDimsPerm()[i];
+              }
+              extractSliceOffsets.push_back(localIvs[indirection]);
+            }
+            for (size_t i = numLoops; i < unpackOp.getSourceRank(); i++) {
+              extractSliceOffsets.push_back(rewriter.getIndexAttr(0));
+            }
+            SmallVector<OpFoldResult> extractSliceSizes;
+            for (int i = 0; i < numLoops; i++) {
+              extractSliceSizes.push_back(rewriter.getIndexAttr(1));
+            }
+            for (size_t i = numLoops; i < unpackOp.getSourceRank(); i++) {
+              extractSliceSizes.push_back(rewriter.getIndexAttr(
+                  unpackOp.getStaticInnerTiles()[i - numLoops]));
+            }
+	    SmallVector<OpFoldResult> extractSliceStrides(
+                unpackOp.getSourceRank(), rewriter.getIndexAttr(1));
+            auto tensorExtractType =
+                tensor::ExtractSliceOp::inferCanonicalRankReducedResultType(
+                    unpackOp.getStaticInnerTiles().size(),
+                    unpackOp.getSource().getType().cast<RankedTensorType>(),
+                    extractSliceOffsets, extractSliceSizes, extractSliceStrides);
+
+            auto tensorExtract = rewriter.create<tensor::ExtractSliceOp>(
+                loc, tensorExtractType.cast<RankedTensorType>(),
+                unpackOp.getSource(), extractSliceOffsets, extractSliceSizes, extractSliceStrides);
+
+            auto insertSliceOp = rewriter.create<tensor::InsertSliceOp>(
+                loc, tensorExtract.getResult(), iterArgs[0], offsets,
+                sizes, strides);
+            return {insertSliceOp};
+          });
+      rewriter.replaceAllUsesWith(unpackOp.getResult(),
+                                  loopNest.loops[0].getResults()[0]);
+      return success();
+    }
+    return failure();
+  }
+};
+
 void populateTppPackUnpackPatterns(RewritePatternSet &patterns) {
   // clang-format off
      patterns.add<ConvertTppPackOp>(patterns.getContext());
+     patterns.add<ConvertTppUnpackOp>(patterns.getContext());
   // clang-format on
 }
 
