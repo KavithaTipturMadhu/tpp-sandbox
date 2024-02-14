@@ -411,6 +411,7 @@ FailureOr<int64_t> getLeadingDim(Type type, size_t pos) {
   return strides[pos];
 }
 
+
 } // namespace utils
 } // namespace xsmm
 } // namespace mlir
