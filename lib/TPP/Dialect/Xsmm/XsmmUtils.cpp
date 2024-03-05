@@ -10,6 +10,7 @@
 #include "TPP/Dialect/Xsmm/XsmmOps.h"
 #include "TPP/Transforms/Utils/ValueUtils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/TypeUtilities.h"
@@ -289,17 +290,19 @@ FailureOr<BinaryFlags> getBinaryFlags(Type operandType, Type outputType,
 FailureOr<FusedMatch> getFusedBrgemmSequenceFromProducer(Operation *op) {
   // The loop is in reverse order, so we deduplicate the list making sure we
   // only have one type of each
+
   SmallVector<Operation *, 3> chain;
   Operation *prev = nullptr;
   for (auto *user : op->getUsers()) {
     // Deduplicate, only take each operation once
     if ((dyn_cast<xsmm::UnaryOp>(user) &&
-         dyn_cast<xsmm::UnaryOp>(user).getCallee() == UnaryKind::ZERO) ||
-        dyn_cast<func::ReturnOp>(user) || user == prev)
+         (dyn_cast<xsmm::UnaryOp>(user).getCallee() == UnaryKind::ZERO ||
+          dyn_cast<xsmm::UnaryOp>(user).getCallee() == UnaryKind::IDENTITY)) ||
+        dyn_cast<func::ReturnOp>(user) || dyn_cast<memref::DeallocOp>(user) ||
+        user == prev)
       continue;
     chain.push_back(user);
     prev = user;
-
     // BRGEMM is the last one, we can stop looking
     if (auto brgemmOp = (dyn_cast<xsmm::BrgemmOp>(user))) {
       // Make sure the BRGEMM outputs to the chain value
@@ -308,14 +311,6 @@ FailureOr<FusedMatch> getFusedBrgemmSequenceFromProducer(Operation *op) {
         return failure();
       continue;
     }
-
-    // Make sure this is a chain, ie. at least once in inputs and outputs
-    int numUses = std::count(user->getOperands().begin(),
-                             user->getOperands().end(), op->getResult(0));
-    // At least one input and the last operand (output) is the same buffer
-    if (numUses < 2 ||
-        user->getOperands()[user->getOperands().size() - 1] != op->getResult(0))
-      return failure();
   }
   // We don't know how to fuse more than two tail ops after the BRGEMM
   if (chain.size() > 3)
@@ -359,6 +354,31 @@ FailureOr<FusedMatch> getFusedBrgemmSequenceFromProducer(Operation *op) {
 
       // Make sure the op is new or the same as before
       fusedMatch.binaryOp = binOp;
+
+      auto dependentOperandOne = fusedMatch.binaryOp.getOperand(
+          fusedMatch.binaryOp.getNumOperands() - 2);
+      if (dependentOperandOne.getDefiningOp() != NULL &&
+          dyn_cast<memref::SubViewOp>(dependentOperandOne.getDefiningOp()))
+        dependentOperandOne =
+            dyn_cast<memref::SubViewOp>(dependentOperandOne.getDefiningOp())
+                ->getOperand(0);
+      auto dependentOperandTwo = fusedMatch.binaryOp.getOperand(
+          fusedMatch.binaryOp.getNumOperands() - 3);
+      if (dependentOperandTwo.getDefiningOp() != NULL &&
+          dyn_cast<memref::SubViewOp>(dependentOperandTwo.getDefiningOp()))
+        dependentOperandTwo =
+            dyn_cast<memref::SubViewOp>(dependentOperandTwo.getDefiningOp())
+                ->getOperand(0);
+      auto result = fusedMatch.brgemmOp.getOperand(
+          fusedMatch.brgemmOp.getNumOperands() - 2);
+      if (result.getDefiningOp() != NULL &&
+          dyn_cast<memref::SubViewOp>(result.getDefiningOp()))
+        result =
+            dyn_cast<memref::SubViewOp>(result.getDefiningOp())->getOperand(0);
+      if (result != dependentOperandOne && result != dependentOperandTwo) {
+        return failure();
+      }
+
       fusedMatch.binaryKind = binOp.getCallee();
       continue;
     }
@@ -378,6 +398,34 @@ FailureOr<FusedMatch> getFusedBrgemmSequenceFromProducer(Operation *op) {
 
       // Make sure the op is new or the same as before
       fusedMatch.unaryOp = unOp;
+      auto dependentOperand = fusedMatch.unaryOp.getOperand(
+          fusedMatch.unaryOp.getNumOperands() - 2);
+      if (dependentOperand.getDefiningOp() != NULL &&
+          dyn_cast<memref::SubViewOp>(dependentOperand.getDefiningOp()))
+        dependentOperand =
+            dyn_cast<memref::SubViewOp>(dependentOperand.getDefiningOp())
+                ->getOperand(0);
+      if (fusedMatch.binaryOp != NULL) {
+        auto result = fusedMatch.binaryOp.getOperand(
+            fusedMatch.binaryOp.getNumOperands() - 1);
+        if (result.getDefiningOp() != NULL &&
+            dyn_cast<memref::SubViewOp>(result.getDefiningOp()))
+          result = dyn_cast<memref::SubViewOp>(result.getDefiningOp())
+                       ->getOperand(0);
+        if (result != dependentOperand)
+          return failure();
+      } else {
+        auto result = fusedMatch.brgemmOp.getOperand(
+            fusedMatch.brgemmOp.getNumOperands() - 2);
+        if (result.getDefiningOp() != NULL &&
+            dyn_cast<memref::SubViewOp>(result.getDefiningOp()))
+          result = dyn_cast<memref::SubViewOp>(result.getDefiningOp())
+                       ->getOperand(0);
+        if (result != dependentOperand) {
+          return failure();
+        }
+      }
+
       fusedMatch.unaryKind = unOp.getCallee();
       continue;
     }
