@@ -111,7 +111,7 @@ struct VectorizationPass
     patterns.add<
         LinalgToVector<linalg::BatchReduceMatmulOp>,
         LinalgToVector<linalg::FillOp>, LinalgToVector<linalg::TransposeOp>,
-        LinalgToVector<linalg::BroadcastOp>, LinalgToVector<linalg::CopyOp>>(
+        LinalgToVector<linalg::BroadcastOp>, LinalgToVector<linalg::MatmulOp>, LinalgToVector<linalg::CopyOp>>(
         patterns.getContext());
     patterns.add<LinalgGenericToVector>(patterns.getContext());
   }

@@ -309,6 +309,7 @@ FailureOr<BrgemmInfo> isMappableToBrgemm(PatternRewriter &rewriter,
   SmallVector<unsigned, 2> kVector;
   std::optional<unsigned> batch;
   if (contractionDims->k.size() >= 2) {
+    batch = contractionDims->k[0];
     for (size_t i = 1; i < contractionDims->k.size(); i++)
       kVector.push_back(contractionDims->k[i]);
   } else {
