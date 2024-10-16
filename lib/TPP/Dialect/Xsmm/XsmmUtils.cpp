@@ -19,6 +19,7 @@
 #include "mlir/IR/TypeUtilities.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Compiler.h"
+#include <iostream>
 #define DEBUG_TYPE "xsmm-utils"
 
 using namespace mlir;
@@ -159,7 +160,7 @@ checkAccess(PatternRewriter &rewriter, vector::ContractionOp contractOp,
   Value operandB = inputs[1];
   Value operandC = inputs[2];
 
-  unsigned k;
+  unsigned k = kVector[0];
   if (*xsmm::utils::getPosInCodomain(
           kVector[0], contractOp->getOpOperand(1).get(), contractOp,
           contractOp.getIndexingMapsArray()[1]) <
@@ -171,7 +172,6 @@ checkAccess(PatternRewriter &rewriter, vector::ContractionOp contractOp,
   } else if (kVector.size() > 1) {
     k = kVector[1];
   }
-
   auto checkStridesAndGetLda = [&](unsigned minorDim, unsigned majorDim,
                                    Value operand, AffineMap map,
                                    int operandIndex) -> FailureOr<int64_t> {
@@ -193,21 +193,23 @@ checkAccess(PatternRewriter &rewriter, vector::ContractionOp contractOp,
       stridesOnOperand = ::mlir::utils::getStaticStrides(operand);
     }
     if (failed(stridesOnOperand) ||
-        (dataType == xsmm::DataTypeAttr::get(contractOp.getContext(),
-                                             xsmm::DataType::BF16) &&
-         operandIndex == 0 &&
-         (*stridesOnOperand)[*minorDimPosInCodomain] != 2) ||
         ((dataType != xsmm::DataTypeAttr::get(contractOp.getContext(),
                                               xsmm::DataType::BF16) &&
           (*stridesOnOperand)[*minorDimPosInCodomain] != 1))) {
-      return failure();
+	    return failure();
     }
     if (dataType == xsmm::DataTypeAttr::get(contractOp.getContext(),
                                             xsmm::DataType::BF16) &&
         operandIndex == 1) {
-      return (*stridesOnOperand)[*majorDimPosInCodomain + 1];
-    } else {
-      return (*stridesOnOperand)[*majorDimPosInCodomain];
+      if(*majorDimPosInCodomain == (*stridesOnOperand).size() - 2){
+      	return (*stridesOnOperand)[*majorDimPosInCodomain + 1];
+      }else if (*majorDimPosInCodomain == (*stridesOnOperand).size() - 1){
+      	return (*stridesOnOperand)[*majorDimPosInCodomain -1];
+      }else{
+      	return (*stridesOnOperand)[*majorDimPosInCodomain];
+      }
+    }else{
+    	return (*stridesOnOperand)[*majorDimPosInCodomain];
     }
   };
   // A(m, k)
@@ -257,7 +259,6 @@ checkAccess(PatternRewriter &rewriter, vector::ContractionOp contractOp,
 
   auto loops = computeStaticLoopSizes(contractOp, indexingMap);
   int64_t batchVal = (batchPos) ? loops[batchPos.value()] : 0;
-
   auto loopsK = 1;
   for (auto kItr : kVector)
     loopsK *= loops[kItr];
@@ -308,15 +309,32 @@ FailureOr<BrgemmInfo> isMappableToBrgemm(PatternRewriter &rewriter,
   unsigned n = contractionDims->n.back();
   SmallVector<unsigned, 2> kVector;
   std::optional<unsigned> batch;
+  auto pos = xsmm::utils::getPosInCodomain(
+      contractionDims->k[0], inputs[0], contractOp,
+      contractOp.getIndexingMapsArray()[0]);
+  int index = 0;
   if (contractionDims->k.size() >= 2) {
-    batch = contractionDims->k[0];
-    for (size_t i = 1; i < contractionDims->k.size(); i++)
+    for (int i = 1; i < contractionDims->k.size(); i++) {
+      auto posTwo = xsmm::utils::getPosInCodomain(
+          contractionDims->k[i], inputs[0], contractOp,
+          contractOp.getIndexingMapsArray()[0]);
+      if (*posTwo < *pos) {
+        index = i;
+	pos = posTwo;
+      }
+    }
+  }
+  if (contractionDims->k.size() >= 2) {
+    batch = contractionDims->k[index];
+    for (int i = 0; i < contractionDims->k.size(); i++) {
+      if (i == index)
+        continue;
       kVector.push_back(contractionDims->k[i]);
+    }
   } else {
     for (size_t i = 0; i < contractionDims->k.size(); i++)
       kVector.push_back(contractionDims->k[i]);
   }
-
   LLVM_DEBUG(llvm::dbgs() << "[isMappableToBrge"
                              "mm] Candidate "
                              "dims: "
@@ -753,15 +771,15 @@ makeMinorDimensionsInnerMost(RewriterBase &rewriter,
   if (!isInnerMostDim(&operandC, *minorNInCodomainOpC, contractOp, type, 2)) {
     LLVM_DEBUG(llvm::dbgs()
                << "[makeMinorDimensionsInnerMost] emit transpose for C\n");
-    assert(
-        isInnerMostDim(&operandC, *minorMInCodomainOpC, contractOp, type, 2));
-    if (isInnerMostDim(operandA, *minorKInCodomainOpA, contractOp, type, 0)) {
-      emitTransposeOnOperand(rewriter, contractOp, operandA->get(),
-                             *minorKInCodomainOpA, *minorMInCodomainOpA, 0);
-    }
-    if (isInnerMostDim(operandB, *minorNInCodomainOpB, contractOp, type, 1)) {
-      emitTransposeOnOperand(rewriter, contractOp, operandB->get(),
-                             *minorNInCodomainOpB, *minorKInCodomainOpB, 1);
+    if (isInnerMostDim(&operandC, *minorMInCodomainOpC, contractOp, type, 2)) {
+      if (isInnerMostDim(operandA, *minorKInCodomainOpA, contractOp, type, 0)) {
+        emitTransposeOnOperand(rewriter, contractOp, operandA->get(),
+                               *minorKInCodomainOpA, *minorMInCodomainOpA, 0);
+      }
+      if (isInnerMostDim(operandB, *minorNInCodomainOpB, contractOp, type, 1)) {
+        emitTransposeOnOperand(rewriter, contractOp, operandB->get(),
+                               *minorNInCodomainOpB, *minorKInCodomainOpB, 1);
+      }
     }
     // Avoid transpose on the output by swapping A and B.
     OpOperand *operandA = &contractOp->getOpOperand(0);
@@ -781,20 +799,21 @@ makeMinorDimensionsInnerMost(RewriterBase &rewriter,
     });
     return contractOp;
   }
-
   if (!isInnerMostDim(operandA, *minorKInCodomainOpA, contractOp, type, 0)) {
     LLVM_DEBUG(llvm::dbgs()
                << "[makeMinorDimensionsInnerMost] emit transpose for A\n");
-    assert(isInnerMostDim(operandA, *minorMInCodomainOpA, contractOp, type, 0));
-    emitTransposeOnOperand(rewriter, contractOp, operandA->get(),
-                           *minorKInCodomainOpA, *minorMInCodomainOpA, 0);
+    if (isInnerMostDim(operandA, *minorMInCodomainOpA, contractOp, type, 0)) {
+      emitTransposeOnOperand(rewriter, contractOp, operandA->get(),
+                             *minorKInCodomainOpA, *minorMInCodomainOpA, 0);
+    }
   }
   if (!isInnerMostDim(operandB, *minorNInCodomainOpB, contractOp, type, 1)) {
     LLVM_DEBUG(llvm::dbgs()
                << "[makeMinorDimensionsInnerMost] emit transpose for B\n");
-    assert(isInnerMostDim(operandB, *minorKInCodomainOpB, contractOp, type, 1));
-    emitTransposeOnOperand(rewriter, contractOp, operandB->get(),
-                           *minorKInCodomainOpB, *minorNInCodomainOpB, 1);
+    if (isInnerMostDim(operandB, *minorKInCodomainOpB, contractOp, type, 1)) {
+      emitTransposeOnOperand(rewriter, contractOp, operandB->get(),
+                             *minorKInCodomainOpB, *minorNInCodomainOpB, 1);
+    }
   }
   return contractOp;
 }
@@ -884,6 +903,8 @@ func::CallOp buildDispatchCall(RewriterBase &rewriter, Location loc,
         rewriter.create<func::FuncOp>(loc, fnName.getValue(), libFnType);
     funcOp.setPrivate();
   }
+
+  rewriter.setInsertionPoint(dispatchOperands.back().getDefiningOp());
 
   func::CallOp call = rewriter.create<func::CallOp>(
       loc, fnName.getValue(), IntegerType::get(rewriter.getContext(), 64),

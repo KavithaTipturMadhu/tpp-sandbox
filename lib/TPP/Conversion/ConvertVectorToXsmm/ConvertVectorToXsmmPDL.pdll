@@ -13,9 +13,9 @@ Rewrite BuildOpWithBetaZero(op:Op<vector.contract>,input0:Op<>, input1:Op<>, inp
 
 Rewrite BuildOp(op:Op<vector.contract>,input0:Op<>, input1:Op<>, input2:Op<>)->(dispatch:Op<func.callOp>, invoke:Op<func.callOp>);
 
-Rewrite BuildOpWithBetaZeroAndBiasRelu(op:Op<vector.contract>,input0:Op<>, input1:Op<>, input2:Op<>, betaZero:Op<>, addf:Op<vector.transfer_write>, maxf:Op<vector.transfer_write>)->(dispatch:Op<func.callOp>, invoke:Op<func.callOp>);
+Rewrite BuildOpWithBetaZeroAndBiasRelu(op:Op<vector.contract>,input0:Op<>, input1:Op<>, input2:Op<>, betaZero:Op<>, bcastInput:Value, addf:Op<vector.transfer_write>, maxf:Op<vector.transfer_write>)->(dispatch:Op<func.callOp>, invoke:Op<func.callOp>);
 
-Rewrite BuildOpWithBiasRelu(op:Op<vector.contract>,input0:Op<>, input1:Op<>, input2:Op<>,  addf:Op<vector.transfer_write>, maxf:Op<vector.transfer_write>)->(dispatch:Op<func.callOp>, invoke:Op<func.callOp>);
+Rewrite BuildOpWithBiasRelu(op:Op<vector.contract>,input0:Op<>, input1:Op<>, input2:Op<>, bcastInput:Value, addf:Op<vector.transfer_write>, maxf:Op<vector.transfer_write>)->(dispatch:Op<func.callOp>, invoke:Op<func.callOp>);
 
 Rewrite BuildTranspose(op:Op<>, input0:Op<>, output: Type)->(dispatch:Op<func.callOp>, invoke:Op<func.callOp>);
 
@@ -37,7 +37,7 @@ Pattern ConvertContractToFusedBrgemmWithBetaZero with benefit(15000),recursion{
      ValidateOp(root, input0, input1, input2);
 
      rewrite root with{
-        let replacement = BuildOpWithBetaZeroAndBiasRelu(root, input0, input1, input2, betaZero, addfResult, maxfResult);
+        let replacement = BuildOpWithBetaZeroAndBiasRelu(root, input0, input1, input2, betaZero, bias, addfResult, maxfResult);
         replace root with (replacement.dispatch, replacement.invoke);
         let user = GetUser(replacement.dispatch);
         erase user;
@@ -62,7 +62,7 @@ Pattern ConvertContractToFusedBrgemm with benefit(10000),recursion{
      ValidateOp(root, input0, input1, input2);
 
      rewrite root with{
-        let replacement = BuildOpWithBiasRelu(root, input0, input1, input2, addfResult, maxfResult);
+        let replacement = BuildOpWithBiasRelu(root, input0, input1, input2, bias, addfResult, maxfResult);
         replace root with (replacement.dispatch, replacement.invoke);
         let user = GetUser(replacement.dispatch);
         erase user;

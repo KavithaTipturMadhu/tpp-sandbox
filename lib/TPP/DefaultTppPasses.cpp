@@ -101,17 +101,20 @@ private:
 
       pm.addNestedPass<func::FuncOp>(createVectorizationPass());
       pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
-      pm.addNestedPass<func::FuncOp>(createVectorContractToOuterproduct());
-
-      pm.addPass(createCleanup());
+      if (contractToOuterProduct) {
+        pm.addNestedPass<func::FuncOp>(createVectorContractToOuterproduct());
+        pm.addPass(createCleanup());
+      }
     }
 
     // Convert forAll to parallel loops should run after bufferization
     // as scf.parallel does not handle tensor.
     pm.addPass(createConvertForAllToParallelOp());
     LowLevelParallelizationOptions LowLevelParallelization{parallelTaskGrid};
-
-    pm.addPass(createConvertVectorToXsmm());
+    if (!contractToOuterProduct && !linalgToLoops) {
+      pm.addPass(createConvertVectorToXsmm());
+      pm.addPass(createLoopInvariantCodeMotionPass());
+    }
     // Low level parallelization passes.
     pm.addPass(createLowLevelParallelization(LowLevelParallelization));
     // Covert all local TPP-related dialects.

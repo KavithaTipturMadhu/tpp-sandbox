@@ -31,7 +31,7 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
-
+#include<iostream>
 using namespace mlir;
 using namespace mlir::vector;
 using namespace mlir::linalg;
@@ -115,11 +115,14 @@ buildBrgemm(PatternRewriter &rewriter, Operation *contractOp, Value input0,
   int64_t strideA = brgemmInfo.strideA;
   int64_t strideB = brgemmInfo.strideB;
   auto loc = contractOp->getLoc();
+  auto functionOp = contractOp->getParentOfType<func::FuncOp>();
   auto dtype =
       xsmm::utils::getDataType(rewriter, contractOp->getOperand(0).getType());
   IntegerType integer64 = IntegerType::get(rewriter.getContext(), 64);
   SmallVector<Value, 10> dispatchOperands;
   SmallVector<Type, 10> dispatchOperandTypes;
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPoint(&*functionOp.getBody().op_begin());
   // Dispatch the data type.
   dispatchOperands.push_back(rewriter.create<arith::ConstantOp>(
       loc, integer64, cast<TypedAttr>(dtype)));
@@ -154,7 +157,6 @@ buildBrgemm(PatternRewriter &rewriter, Operation *contractOp, Value input0,
     dispatchOperandTypes.push_back(integer64);
   }
   int64_t oredFlag = xsmm::utils::getOredFlags(brgemmFlags);
-
   dispatchOperands.push_back(rewriter.create<arith::ConstantOp>(
       loc, integer64, IntegerAttr::get(rewriter.getI64Type(), oredFlag)));
   dispatchOperandTypes.push_back(integer64);
@@ -173,6 +175,7 @@ buildBrgemm(PatternRewriter &rewriter, Operation *contractOp, Value input0,
         loc, integer64, rewriter.getIntegerAttr(integer64, batch));
     operandRange.push_back(batchDim);
   }
+  rewriter.setInsertionPoint(contractOp);
   auto invokeCall = xsmm::utils::buildInvokeCall(
       rewriter, loc, module, operandRange, invokeName, dtype);
   return std::make_pair(&*dispatched, &*invokeCall);
@@ -230,7 +233,8 @@ buildOpImpl(PatternRewriter &rewriter, Operation *contractOp, Operation *input0,
 static std::pair<Operation *, Operation *>
 buildFusedBrgemm(PatternRewriter &rewriter, Operation *contractOp, Value input0,
                  Value input1, Value input2, xsmm::BrgemmInfo brgemmInfo,
-                 SmallVector<Attribute> flags, Operation *addfTransferWrite,
+                 SmallVector<Attribute> flags, Value bcastInput,
+                 Operation *addfTransferWrite,
                  Operation *maximumfTransferWrite) {
   SmallVector<Value> inputs;
   if (isa<mlir::vector::TransposeOp>(input0.getDefiningOp())) {
@@ -262,12 +266,16 @@ buildFusedBrgemm(PatternRewriter &rewriter, Operation *contractOp, Value input0,
   IntegerType integer64 = IntegerType::get(rewriter.getContext(), 64);
   SmallVector<Value, 10> dispatchOperands;
   SmallVector<Type, 10> dispatchOperandTypes;
+  auto functionOp = contractOp->getParentOfType<func::FuncOp>();
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPoint(&*functionOp.getBody().op_begin());
   // Dispatch the data type.
   dispatchOperands.push_back(rewriter.create<arith::ConstantOp>(
       loc, integer64, cast<TypedAttr>(dtype)));
   dispatchOperandTypes.push_back(integer64);
   std::string dispatchName = "xsmm_fused_brgemm_dispatch";
   std::string invokeName = "xsmm_fused_brgemm_invoke";
+
   // TODO: Support more than just COL_0 BCAST
   auto addf = addfTransferWrite->getOperand(0).getDefiningOp();
   auto broadcastInput =
@@ -280,20 +288,6 @@ buildFusedBrgemm(PatternRewriter &rewriter, Operation *contractOp, Value input0,
       addf->getResult(0).getType(), mlir::xsmm::utils::OperandPos::LHS);
   binaryFlagsVector.push_back(
       xsmm::BinaryFlagsAttr::get(rewriter.getContext(), *binaryFlags));
-  int binaryArg = 0;
-  switch (*binaryFlags) {
-  case mlir::xsmm::BinaryFlags::BCAST_COL_IN_0:
-    binaryArg = 0;
-    break;
-  case mlir::xsmm::BinaryFlags::BCAST_COL_IN_1:
-    binaryArg = 1;
-    binaryFlagsVector.clear();
-    binaryFlagsVector.push_back(xsmm::BinaryFlagsAttr::get(
-        rewriter.getContext(), mlir::xsmm::BinaryFlags::BCAST_COL_IN_0));
-    break;
-  default:
-    break;
-  }
   ArrayAttr brgemmFlags = rewriter.getArrayAttr(flags);
   SmallVector<Value> invokeOperands;
 
@@ -311,6 +305,7 @@ buildFusedBrgemm(PatternRewriter &rewriter, Operation *contractOp, Value input0,
   dispatchOperands.push_back(rewriter.create<arith::ConstantOp>(
       loc, integer64, IntegerAttr::get(rewriter.getI64Type(), oredFlag)));
   dispatchOperandTypes.push_back(integer64);
+
   dispatchOperands.push_back(rewriter.create<arith::ConstantOp>(
       loc, integer64,
       cast<TypedAttr>(xsmm::UnaryFlagsAttr::get(rewriter.getContext(),
@@ -323,7 +318,21 @@ buildFusedBrgemm(PatternRewriter &rewriter, Operation *contractOp, Value input0,
                                                xsmm::UnaryKind::RELU))));
   dispatchOperandTypes.push_back(integer64);
 
+  dispatchOperands.push_back(rewriter.create<arith::ConstantOp>(
+      loc, integer64,
+      cast<TypedAttr>(
+          xsmm::BinaryFlagsAttr::get(rewriter.getContext(), *binaryFlags))));
+  dispatchOperandTypes.push_back(integer64);
+
+  dispatchOperands.push_back(rewriter.create<arith::ConstantOp>(
+      loc, integer64,
+      cast<TypedAttr>(xsmm::BinaryKindAttr::get(rewriter.getContext(),
+                                                xsmm::BinaryKind::ADD))));
+
+  dispatchOperandTypes.push_back(integer64);
+
   ModuleOp module = contractOp->getParentOfType<ModuleOp>();
+
   auto dispatched = xsmm::utils::buildDispatchCall(
       rewriter, loc, dispatchOperands, dispatchOperandTypes, module,
       SymbolRefAttr::get(contractOp->getContext(), dispatchName));
@@ -332,13 +341,16 @@ buildFusedBrgemm(PatternRewriter &rewriter, Operation *contractOp, Value input0,
   for (auto operand : inputs) {
     operandRange.push_back(operand);
   }
-  auto maximumf = maximumfTransferWrite->getOperand(0).getDefiningOp();
-  operandRange.push_back(
-      maximumf->getOperand(binaryArg).getDefiningOp()->getOperand(0));
+  Value bcastInputAlloc = bcastInput;
+  if (isa<memref::SubViewOp>(bcastInput.getDefiningOp())) {
+    bcastInputAlloc = bcastInput.getDefiningOp()->getOperand(0);
+  }
+  operandRange.push_back(bcastInputAlloc);
   Value batchDim = rewriter.create<arith::ConstantOp>(
       loc, integer64, rewriter.getIntegerAttr(integer64, batch));
 
   operandRange.push_back(batchDim);
+  rewriter.setInsertionPoint(contractOp);
   auto invokeCall = xsmm::utils::buildInvokeCall(
       rewriter, loc, module, operandRange, invokeName, dtype);
 
@@ -347,8 +359,8 @@ buildFusedBrgemm(PatternRewriter &rewriter, Operation *contractOp, Value input0,
 
 static std::pair<Operation *, Operation *> buildOpWithBetaZeroAndBiasReluImpl(
     PatternRewriter &rewriter, Operation *contractOp, Operation *input0,
-    Operation *input1, Operation *input2, Operation *betaZero, Operation *addf,
-    Operation *maximumf) {
+    Operation *input1, Operation *input2, Operation *betaZero, Value bcastInput,
+    Operation *addfTransferWrite, Operation *maximumfTransferWrite) {
   auto brgemmInfo =
       computeBrgemmInfo(rewriter, contractOp, input0->getResult(0),
                         input1->getResult(0), input2->getResult(0));
@@ -362,13 +374,15 @@ static std::pair<Operation *, Operation *> buildOpWithBetaZeroAndBiasReluImpl(
 
   return buildFusedBrgemm(rewriter, contractOp, input0->getResult(0),
                           input1->getResult(0), input2->getResult(0),
-                          *brgemmInfo, flags, addf, maximumf);
+                          *brgemmInfo, flags, bcastInput, addfTransferWrite,
+                          maximumfTransferWrite);
 }
 
 static std::pair<Operation *, Operation *>
 buildOpWithBiasReluImpl(PatternRewriter &rewriter, Operation *contractOp,
                         Operation *input0, Operation *input1, Operation *input2,
-                        Operation *addf, Operation *maximumf) {
+                        Value bcastInput, Operation *addfTransferWrite,
+                        Operation *maximumfTransferWrite) {
   auto brgemmInfo =
       computeBrgemmInfo(rewriter, contractOp, input0->getResult(0),
                         input1->getResult(0), input2->getResult(0));
@@ -379,7 +393,8 @@ buildOpWithBiasReluImpl(PatternRewriter &rewriter, Operation *contractOp,
   }
   return buildFusedBrgemm(rewriter, contractOp, input0->getResult(0),
                           input1->getResult(0), input2->getResult(0),
-                          *brgemmInfo, flags, addf, maximumf);
+                          *brgemmInfo, flags, bcastInput, addfTransferWrite,
+                          maximumfTransferWrite);
 }
 
 static std::pair<Operation *, Operation *>
@@ -414,6 +429,9 @@ buildTransposeOp(PatternRewriter &rewriter, Operation *transposeOp,
     // Adjust ldo based on the VNNI factor.
     unaryInfo.ldo =
         stridesOnOutput->front() / *vnni::utils::getVnniBlockingFactor(output);
+    auto functionOp = transposeOp->getParentOfType<func::FuncOp>();
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(&*functionOp.getBody().op_begin());
 
     // If `OpTy` is unary or binary we need to dispatch and extra
     // integer for the kind of operation to invoke.
@@ -466,7 +484,7 @@ buildTransposeOp(PatternRewriter &rewriter, Operation *transposeOp,
           rewriter.create<func::FuncOp>(loc, fnName.getValue(), libFnType);
       funcOp.setPrivate();
     }
-
+    rewriter.setInsertionPoint(transposeOp);
     auto invokeCall = rewriter.create<func::CallOp>(
         loc, fnName.getValue(), TypeRange(),
         xsmm::utils::getOperands(rewriter, loc, transposeOp->getOperands(),
@@ -477,8 +495,10 @@ buildTransposeOp(PatternRewriter &rewriter, Operation *transposeOp,
   auto unaryInfo = xsmm::utils::getUnaryInfo(transposeOp->getOperand(0),
                                              transposeOp->getResult(0),
                                              xsmm::UnaryFlags::NONE);
-  // If `OpTy` is unary or binary we need to dispatch and extra
-  // integer for the kind of operation to invoke.
+  auto functionOp = transposeOp->getParentOfType<func::FuncOp>();
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPoint(&*functionOp.getBody().op_begin());
+
   dispatchOperands.push_back(rewriter.create<arith::ConstantOp>(
       loc, integer64, cast<TypedAttr>(dtype)));
   dispatchOperandTypes.push_back(integer64);
@@ -532,7 +552,7 @@ buildTransposeOp(PatternRewriter &rewriter, Operation *transposeOp,
         rewriter.create<func::FuncOp>(loc, fnName.getValue(), libFnType);
     funcOp.setPrivate();
   }
-
+  rewriter.setInsertionPoint(transposeOp);
   auto invokeCall = rewriter.create<func::CallOp>(
       loc, fnName.getValue(), TypeRange(),
       xsmm::utils::getOperands(rewriter, loc, transposeOp->getOperands(),
@@ -646,8 +666,12 @@ struct ConvertVectorToXsmm
           inputs.push_back(contractOp->getOpOperand(1).get());
           inputs.push_back(contractOp->getOpOperand(2).get());
           if (contractionDims->k.size() >= 2) {
-            for (size_t i = 1; i < contractionDims->k.size(); i++)
-              kVector.push_back(contractionDims->k[i]);
+            int i = 0;
+	    for (auto dim =  contractionDims->k.begin(); dim != contractionDims->k.end(); dim++, i++){
+	    	if(i == 0)
+			continue;
+  		 kVector.push_back(*dim);
+	    }
           } else {
             for (size_t i = 0; i < contractionDims->k.size(); i++)
               kVector.push_back(contractionDims->k[i]);
