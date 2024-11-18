@@ -23,6 +23,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetOperations.h"
 #include "llvm/Support/Compiler.h"
+#include <iostream>
 #include <map>
 #define DEBUG_TYPE "xsmm-utils"
 
@@ -157,9 +158,9 @@ computeBcastShapeInput(ArrayRef<int64_t> higherRankShape,
     if (lowerRankDim == 1 && higherRankDim > 1)
       reshapeOutputShape[i] = 1;
     else if ((lowerRankDim > 1 && higherRankDim == 1) ||
-             (lowerRankDim == higherRankDim))
+             (lowerRankDim == higherRankDim)) {
       reshapeOutputShape[i] = lowerRankDim;
-    else if (higherRankDim != lowerRankDim)
+    } else if (higherRankDim != lowerRankDim)
       assert(false && "bCast semantics for identity op broken");
   }
 }
@@ -415,39 +416,33 @@ FailureOr<UnaryInfo> getUnaryInfo(Value input, Value output,
   return unaryInfo;
 }
 
-FailureOr<UnaryInfo> getVectorUnaryInfo(Value input, Value output,
-                                        Value outputVectorType,
+FailureOr<UnaryInfo> getVectorUnaryInfo(MemRefType inputType,
+                                        MemRefType outputType,
+                                        VectorType inputVectorType,
+                                        VectorType outputVectorType,
                                         UnaryFlags inputFlag) {
-  Type outputType = outputVectorType.getType();
-
-  assert(isa<ShapedType>(outputType));
-  auto outputShapedType = cast<ShapedType>(outputType);
-  if (!outputShapedType.hasStaticShape() ||
-      !isa<FloatType>(outputShapedType.getElementType())) {
+  if (!outputVectorType.hasStaticShape() ||
+      !isa<FloatType>(outputVectorType.getElementType())) {
     return failure();
   }
 
   UnaryInfo unaryInfo;
   unaryInfo.m = 1;
-  for (int i = 0; i < outputShapedType.getShape().size() - 1; i++) {
-    unaryInfo.m *= outputShapedType.getShape()[i];
+  for (int i = 0; i < outputVectorType.getShape().size() - 1; i++) {
+    unaryInfo.m *= outputVectorType.getShape()[i];
   }
   unaryInfo.n =
-      outputShapedType.getShape()[outputShapedType.getShape().size() - 1];
+      outputVectorType.getShape()[outputVectorType.getShape().size() - 1];
   int ldo = 1;
 
-  ShapedType inputShapedType;
-  if ((inputShapedType = dyn_cast<ShapedType>(input.getType()))) {
-    SmallVector<int64_t> strides;
-    int64_t offset;
-    SmallVector<int64_t> bShapeInput;
-    computeBcastShapeInput(outputShapedType.getShape(),
-                           inputShapedType.getShape(), bShapeInput);
-    auto memrefType =
-        MemRefType::get(bShapeInput, inputShapedType.getElementType());
-    getStridesAndOffset(memrefType, strides, offset);
-    ldo = strides[0];
-  }
+  SmallVector<int64_t> strides;
+  int64_t offset;
+  SmallVector<int64_t> bShapeInput;
+  computeBcastShapeInput(inputType.getShape(), inputVectorType.getShape(),
+                         bShapeInput);
+  auto memrefType = MemRefType::get(bShapeInput, inputType.getElementType());
+  getStridesAndOffset(memrefType, strides, offset);
+  ldo = strides[0];
 
   unaryInfo.ldo = ldo;
   int ldi = 1;
@@ -459,16 +454,15 @@ FailureOr<UnaryInfo> getVectorUnaryInfo(Value input, Value output,
   } // If we are broascasting a col into rows, the leading
   // dimension is the size of the tensor.
   else if (inputFlag == UnaryFlags::BCAST_COL) {
-    ldi = inputShapedType.getShape()[0];
-  } else if (ShapedType(outputShapedType =
-                            dyn_cast<ShapedType>(output.getType()))) {
+    ldi = inputVectorType.getShape()[0];
+  } else {
     SmallVector<int64_t> strides;
     int64_t offset;
     SmallVector<int64_t> bShapeInput;
-    computeBcastShapeInput(cast<ShapedType>(outputType).getShape(),
-                           outputShapedType.getShape(), bShapeInput);
+    computeBcastShapeInput(outputType.getShape(), outputVectorType.getShape(),
+                           bShapeInput);
     auto memrefType =
-        MemRefType::get(bShapeInput, outputShapedType.getElementType());
+        MemRefType::get(bShapeInput, outputVectorType.getElementType());
     getStridesAndOffset(memrefType, strides, offset);
     ldi = strides[0];
   }

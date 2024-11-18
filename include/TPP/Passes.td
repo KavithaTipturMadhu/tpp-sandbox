@@ -57,16 +57,15 @@ def VectorizationPass : Pass<"vectorization-pass",
   let dependentDialects = [ "memref::MemRefDialect", "linalg::LinalgDialect", "mlir::vector::VectorDialect" ];
 }
 
-def ConvertTranspose : Pass<"convert-transpose-to-xsmm", "func::FuncOp"> {
-  let summary = "Convert transpose to xsmm";
+def InsertTranspose : Pass<"insert-transpose-pass", "func::FuncOp"> {
+  let summary = "Insert transpose before gemm/brgemm and convert to xsmm";
   let description = [{
-    Convert vector operations to XSMM operations.
+    Insert transpose before gemm or brgemm and convert to xsmm.
   }];
   let dependentDialects = ["func::FuncDialect",
                            "memref::MemRefDialect",
                            "mlir::vector::VectorDialect",
                            "LLVM::LLVMDialect"];
-  let constructor = "mlir::tpp::createConvertTranspose()";
 }
 
 def VectorContractToOuterproduct : Pass<

@@ -4,6 +4,6 @@ using namespace mlir;
 
 namespace mlir {
 namespace tpp {
-std::unique_ptr<mlir::Pass> createConvertTranspose();
+std::unique_ptr<mlir::Pass> createInsertTranspose();
 }
 } // namespace mlir

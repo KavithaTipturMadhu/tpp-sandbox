@@ -81,9 +81,12 @@ namespace utils {
 
 DataTypeAttr getDataType(RewriterBase &rewriter, Type type);
 
-FailureOr<UnaryInfo> getVectorUnaryInfo(Value input, Value output,
-                                        Value outputVectorType,
+FailureOr<UnaryInfo> getVectorUnaryInfo(MemRefType inputType,
+                                        MemRefType outputType,
+                                        VectorType inputVectorType,
+                                        VectorType outputVectorType,
                                         UnaryFlags inputFlag);
+
 FailureOr<UnaryInfo> getUnaryInfo(Value input, Value output,
                                   UnaryFlags inputFlag);
 

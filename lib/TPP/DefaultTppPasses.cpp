@@ -74,7 +74,7 @@ private:
     // Default is to not skip anything
     LinalgLoweringOptions linalgOptions;
     if (linalgToVector)
-      linalgOptions.skipOperations = { "all" };
+      linalgOptions.skipOperations = {"all"};
 
     pm.addPass(createFoldAddIntoDest());
     if (linalgToLoops) {
@@ -115,11 +115,13 @@ private:
         // Vectorizes the remaining Linalg operations
         pm.addNestedPass<func::FuncOp>(createVectorizationPass());
         pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
-
-        // TODO: Add a flag for this pass so it doesn't conflate with other options.
-        pm.addNestedPass<func::FuncOp>(createVectorContractToOuterproduct());
+        if (outerProduct) {
+          pm.addNestedPass<func::FuncOp>(createVectorContractToOuterproduct());
+        }
+        if (insertTranspose) {
+          pm.addPass(createInsertTranspose());
+        }
       }
-
       // Final cleanup.
       pm.addPass(createCleanup());
     }

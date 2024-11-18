@@ -36,7 +36,7 @@ int main(int argc, char **argv) {
   mlir::registerAllPasses();
   mlir::tpp::registerTppCompilerPasses();
   mlir::tpp::registerTppPassBundlePasses();
-  mlir::tpp::registerConvertTransposePass();
+  mlir::tpp::createInsertTranspose();
 
   mlir::DialectRegistry registry;
   registry.insert<mlir::xsmm::XsmmDialect>();

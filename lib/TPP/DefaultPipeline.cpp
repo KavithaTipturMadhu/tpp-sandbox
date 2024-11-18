@@ -62,6 +62,16 @@ llvm::cl::opt<bool> lowerPackUnpackWithoutTranspose(
     llvm::cl::desc("Lower packs and unpacks reverting any dim permutations"),
     llvm::cl::init(false));
 
+llvm::cl::opt<bool>
+    insertTranspose("insert-transpose",
+                    llvm::cl::desc("Insert transposes before gemm/brgemm"),
+                    llvm::cl::init(false));
+
+llvm::cl::opt<bool>
+    outerproduct("contract-to-outer-product",
+                 llvm::cl::desc("Lower contract-to-outer-product"),
+                 llvm::cl::init(false));
+
 namespace mlir {
 namespace tpp {
 #define GEN_PASS_DEF_DEFAULTPIPELINE
@@ -134,8 +144,9 @@ private:
     } else {
       // Apply the default preprocessing pass
       DefaultTppPassesOptions tppDefaultOptions{
-          linalgToLoops, parallelTaskGrid, linalgToVector,
-          lowerPackUnpackWithoutTranspose};
+          linalgToLoops,   parallelTaskGrid,
+          linalgToVector,  lowerPackUnpackWithoutTranspose,
+          insertTranspose, outerproduct};
       pm.addPass(createDefaultTppPasses(tppDefaultOptions));
     }
 

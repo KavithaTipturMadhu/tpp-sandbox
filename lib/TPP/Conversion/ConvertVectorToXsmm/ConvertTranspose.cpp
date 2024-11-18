@@ -129,9 +129,11 @@ buildTransposeOp(PatternRewriter &rewriter, Operation *transposeOp,
 
     return std::make_pair(&*dispatched, &*invokeCall);
   }
-
   auto unaryInfo = xsmm::utils::getVectorUnaryInfo(
-      input->getOperand(0), output->getOperand(1), output->getOperand(0),
+      dyn_cast<MemRefType>(input->getOperand(0).getType()),
+      dyn_cast<MemRefType>(output->getOperand(1).getType()),
+      dyn_cast<VectorType>(input->getResult(0).getType()),
+      dyn_cast<VectorType>(output->getOperand(0).getType()),
       xsmm::UnaryFlags::NONE);
   auto functionOp = transposeOp->getParentOfType<func::FuncOp>();
   OpBuilder::InsertionGuard guard(rewriter);
@@ -213,7 +215,10 @@ validateTransposeOpImpl(PatternRewriter &rewriter, Operation *transposeOp,
     if (failed(stridesOnOutput) || stridesOnOutput->back() != 1)
       return failure(transposeOp);
     auto unaryInfo = xsmm::utils::getVectorUnaryInfo(
-        input->getOperand(0), output->getOperand(1), output->getOperand(0),
+        dyn_cast<MemRefType>(input->getOperand(0).getType()),
+        dyn_cast<MemRefType>(output->getOperand(1).getType()),
+        dyn_cast<VectorType>(input->getResult(0).getType()),
+        dyn_cast<VectorType>(output->getOperand(0).getType()),
         xsmm::UnaryFlags::NONE);
     if (failed(unaryInfo)) {
       return failure(transposeOp);
@@ -223,8 +228,12 @@ validateTransposeOpImpl(PatternRewriter &rewriter, Operation *transposeOp,
             dyn_cast<mlir::vector::TransposeOp>(transposeOp))) {
       return failure(transposeOp);
     }
+    transposeOp->dump();
     auto unaryInfo = xsmm::utils::getVectorUnaryInfo(
-        input->getOperand(0), output->getOperand(1), output->getOperand(0),
+        dyn_cast<MemRefType>(input->getOperand(0).getType()),
+        dyn_cast<MemRefType>(output->getOperand(1).getType()),
+        dyn_cast<VectorType>(input->getResult(0).getType()),
+        dyn_cast<VectorType>(output->getOperand(0).getType()),
         xsmm::UnaryFlags::NONE);
     if (failed(unaryInfo)) {
       return failure(transposeOp);
@@ -247,10 +256,11 @@ struct ConvertTranspose
     : public PassWrapper<ConvertTranspose, OperationPass<>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConvertTranspose)
 
-  StringRef getArgument() const final { return "convert-transpose-pass"; }
+  StringRef getArgument() const final { return "insert-transpose-pass"; }
 
   StringRef getDescription() const final {
-    return "Convert transpose to XSMM functionality";
+    return "Insert transpose before gemms/brgemms and convert to XSMM "
+           "functionality";
   }
 
   void getDependentDialects(DialectRegistry &registry) const override {
@@ -387,7 +397,7 @@ struct ConvertTranspose
   FrozenRewritePatternSet patterns;
 };
 
-std::unique_ptr<mlir::Pass> createConvertTranspose() {
+std::unique_ptr<mlir::Pass> createInsertTranspose() {
   return std::make_unique<ConvertTranspose>();
 }
 

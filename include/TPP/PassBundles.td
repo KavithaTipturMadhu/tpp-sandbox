@@ -40,7 +40,13 @@ def DefaultTppPasses : Pass<"default-tpp-passes", "ModuleOp"> {
            "Lower linalg directly to vector.">,
     Option<"lowerPackUnpackWithoutTranspose", "lower-pack-unpack-without-transpose",
            "bool", /*default=*/"false",
-           "Lower non-constant packs and unpacks reverting any dim permutations.">
+           "Lower non-constant packs and unpacks reverting any dim permutations.">,
+    Option<"insertTranspose", "insert-transpose",
+           "bool", /*default=*/"false",
+           "Insert Transposes before contract.">,
+    Option<"outerProduct", "contract-to-outer-product",
+           "bool", /*default=*/"false",
+           "Convert contract to outer product.">
   ];
 }
 
