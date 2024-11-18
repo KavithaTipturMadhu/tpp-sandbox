@@ -11,7 +11,12 @@
 
 #include "TPP/Dialect/Xsmm/XsmmEnum.h"
 #include "TPP/Dialect/Xsmm/XsmmOps.h"
+#include "TPP/IR/StructuredOpMatcher.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/Support/Debug.h"
 
 namespace mlir {
 class Type;
@@ -21,6 +26,22 @@ class ArrayAttr;
 class Operation;
 
 namespace xsmm {
+
+struct BrgemmInfo {
+  int64_t m;
+  int64_t n;
+  int64_t k;
+  int64_t batch;
+
+  int64_t lda;
+  int64_t ldb;
+  int64_t ldc;
+  int64_t strideA;
+  int64_t strideB;
+
+  bool isVnni = false;
+};
+
 class UnaryKindAttr;
 
 struct UnaryInfo {
@@ -60,6 +81,9 @@ namespace utils {
 
 DataTypeAttr getDataType(RewriterBase &rewriter, Type type);
 
+FailureOr<UnaryInfo> getVectorUnaryInfo(Value input, Value output,
+                                        Value outputVectorType,
+                                        UnaryFlags inputFlag);
 FailureOr<UnaryInfo> getUnaryInfo(Value input, Value output,
                                   UnaryFlags inputFlag);
 
@@ -77,6 +101,9 @@ FailureOr<UnaryFlags> getUnaryFlags(Type inputType, Type outputType);
 
 // Compute the broadcasting flags for 'operandType' based on 'outputType'.
 enum class OperandPos { LHS = 0, RHS = 1 };
+FailureOr<BinaryFlags> getBinFlags(ArrayRef<int64_t> shapeOutput,
+                                   ArrayRef<int64_t> shapeOperand,
+                                   OperandPos operandNumber);
 FailureOr<BinaryFlags> getBinaryFlags(Type operandType, Type outputType,
                                       OperandPos operandNumber);
 
@@ -92,6 +119,40 @@ template <typename DispatchOpTy>
 FailureOr<SmallVector<Attribute>> getBrgemmFlags(PatternRewriter &rewriter,
                                                  DispatchOpTy dispatchOpTy,
                                                  bool returnNone);
+int64_t getOredFlags(ArrayAttr flags);
+
+SmallVector<Type> extractInvokeOperandTypes(OpBuilder &builder,
+                                            ValueRange operands);
+SmallVector<Value> getOperands(OpBuilder &builder, Location loc,
+                               ValueRange operands, IntegerAttr dataTypeAttr);
+
+FailureOr<vector::ContractionOp>
+makeMinorDimensionsInnerMost(RewriterBase &rewriter,
+                             vector::ContractionOp contractOp, unsigned m,
+                             unsigned n, unsigned k, xsmm::DataTypeAttr type);
+
+std::optional<unsigned>
+getPosInCodomain(unsigned dim, vector::ContractionOp contractOp, AffineMap map);
+
+LogicalResult checkAccess(PatternRewriter &rewriter,
+                          vector::ContractionOp contractOp, unsigned m,
+                          unsigned n, unsigned k,
+                          std::optional<unsigned> batchPos,
+                          SmallVector<Value> inputs,
+                          ArrayRef<AffineMap> indexingMap, bool checkTransposes,
+                          int operandIndex);
+
+bool isTwoDTransposeOp(vector::TransposeOp transposeOp);
+
+func::CallOp buildDispatchCall(RewriterBase &rewriter, Location loc,
+                               ArrayRef<Value> dispatchOperands,
+                               ArrayRef<Type> dispatchOperandTypes,
+                               ModuleOp module, FlatSymbolRefAttr fnName);
+func::CallOp buildInvokeCall(RewriterBase &rewriter, Operation *parentOp,
+                             ModuleOp module, SmallVector<Value> inputOperands,
+                             SmallVector<Value> prependValues, int prependIndex,
+                             SmallVector<Value> operands, StringRef invokeName,
+                             DataTypeAttr dtype, bool getResults = false);
 
 } // namespace utils
 } // namespace xsmm

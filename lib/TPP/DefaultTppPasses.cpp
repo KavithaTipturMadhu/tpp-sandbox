@@ -15,6 +15,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 
+#include "TPP/Conversion/ConvertVectorToXsmm/ConvertTranspose.h"
 #include "TPP/Dialect/Check/BufferizableOpInterfaceImpl.h"
 #include "TPP/Dialect/Check/CheckDialect.h"
 #include "TPP/Dialect/Perf/BufferizableOpInterfaceImpl.h"
@@ -92,8 +93,7 @@ private:
       pm.addPass(createRewriteBatchMatmulToMatmul());
 
       // Applies a set of passes at the linalg level to fuse and pack.
-      TppMappingOptions tppMappingOptions{
-          lowerPackUnpackWithoutTranspose};
+      TppMappingOptions tppMappingOptions{lowerPackUnpackWithoutTranspose};
       pm.addPass(createTppMapping(tppMappingOptions));
 
       // Generalize tensor.pack and tensor.unpack.

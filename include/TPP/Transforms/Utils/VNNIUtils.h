@@ -9,7 +9,12 @@
 #ifndef TPP_TRANSFORMS_UTILS_VNNIUTILS_H
 #define TPP_TRANSFORMS_UTILS_VNNIUTILS_H
 
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/TypeUtilities.h"
+#include "mlir/IR/Types.h"
 #include "mlir/Support/LogicalResult.h"
+
 #include <cstdint>
 #include <optional>
 
@@ -40,12 +45,19 @@ std::optional<int64_t> getVnniBlockingFactor(Type type);
 // Return true if the memref is in VNNI layout with rank `expectedRank`.
 bool isInVnniLayout(VnniOperandRank expectedRank, MemRefType memref);
 
+// Return true if the memref is in VNNI layout with rank `expectedRank`.
+bool isInVnniLayout(VnniOperandRank expectedRank, VectorType vector);
+
+bool isInVnniLayout(int64_t expectedRank, VectorType vector);
+
 // Return the first AffineDimExpr in the map `affineMap`
 // with a VNNI layout pattern (AffineDimExpr floordiv VNNI).
 FailureOr<AffineDimExpr> isInVnniLayout(linalg::GenericOp linalgOp,
                                         AffineMap affineMap,
                                         int64_t blockingFactor);
 
+FailureOr<AffineDimExpr> isInVnniLayout(mlir::vector::ContractionOp contractOp,
+                                        int64_t blockingFactor);
 } // namespace utils
 } // namespace vnni
 } // namespace mlir
