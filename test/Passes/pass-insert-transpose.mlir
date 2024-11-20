@@ -128,3 +128,40 @@ func.func @matmul_static(%arg0: memref<4x8xf32>, %arg1: memref<16x8xf32>, %arg2:
 // CHECK:       %[[read9:.*]] = vector.contract {indexing_maps = [#map, #map1, #map2], iterator_types = ["parallel", "reduction", "parallel"], kind = #vector.kind<add>} %[[read2]], %[[read8]], %[[read3]]
 // CHECK:       vector.transfer_write %[[read9]], %[[subview]][%[[c0]], %[[c0]]] {in_bounds = [true, true]}
 
+// -----
+
+#map = affine_map<(d0, d1, d2, d3, d4) -> (d0, d2, d4, d1)>
+#map1 = affine_map<(d0, d1, d2, d3, d4) -> (d0, d4, d3, d1)>
+#map2 = affine_map<(d0, d1, d2, d3, d4) -> (d3, d2)>
+module {
+  func.func @vnni_brgemm_require_transpose_on_C(%arg0: memref<16x32x32xbf16>, %arg1: memref<16x16x32x2xbf16>, %arg2: memref<32x32xbf16>) {
+    %cst = arith.constant 0.000000e+00 : bf16
+    %c0 = arith.constant 0 : index
+    %expand_shape = memref.expand_shape %arg0 [[0], [1], [2, 3]] output_shape [16, 32, 16, 2] : memref<16x32x32xbf16> into memref<16x32x16x2xbf16>
+    %0 = vector.transfer_read %expand_shape[%c0, %c0, %c0, %c0], %cst {in_bounds = [true, true, true, true]} : memref<16x32x16x2xbf16>, vector<16x32x16x2xbf16>
+    %1 = vector.transfer_read %arg1[%c0, %c0, %c0, %c0], %cst {in_bounds = [true, true, true, true]} : memref<16x16x32x2xbf16>, vector<16x16x32x2xbf16>
+    %2 = vector.transfer_read %arg2[%c0, %c0], %cst {in_bounds = [true, true]} : memref<32x32xbf16>, vector<32x32xbf16>
+    %3 = vector.contract {indexing_maps = [#map, #map1, #map2], iterator_types = ["reduction", "reduction", "parallel", "parallel", "reduction"], kind = #vector.kind<add>} %0, %1, %2 : vector<16x32x16x2xbf16>, vector<16x16x32x2xbf16> into vector<32x32xbf16>
+    vector.transfer_write %3, %arg2[%c0, %c0] {in_bounds = [true, true]} : vector<32x32xbf16>, memref<32x32xbf16>
+    return
+  }
+}
+
+// CHECK: #map = affine_map<(d0, d1, d2, d3, d4) -> (d3, d4, d0, d1)>
+// CHECK: #map1 = affine_map<(d0, d1, d2, d3, d4) -> (d0, d2, d4, d1)>
+// CHECK: #map2 = affine_map<(d0, d1, d2, d3, d4) -> (d3, d2)>
+// CHECK: module {
+// CHECK-LABEL:  func.func @vnni_brgemm_require_transpose_on_C(
+// CHECK: %[[arg0:.*]]: memref<16x32x32xbf16>, %[[arg1:.*]]: memref<16x16x32x2xbf16>, %[[arg2:.*]]: memref<32x32xbf16>) {
+// CHECK-DAG:  %[[cst:.*]] = arith.constant 0.000000e+00 : bf16
+// CHECK-DAG:  %[[c0:.*]] = arith.constant 0 : index
+// CHECK-DAG:  %[[expand_shape:.*]] = memref.expand_shape %[[arg0]] {{\[}}[0], [1], [2, 3]] output_shape [16, 32, 16, 2]
+// CHECK-DAG:  %[[read0:.*]] = vector.transfer_read %[[expand_shape]][%[[c0]], %[[c0]], %[[c0]], %[[c0]]], %[[cst]] {in_bounds = [true, true, true, true]}
+// CHECK-DAG:  %[[read1:.*]] = vector.transfer_read %[[arg1]][%[[c0]], %[[c0]], %[[c0]], %[[c0]]], %[[cst]] {in_bounds = [true, true, true, true]}
+// CHECK-DAG:  %[[read2:.*]] = vector.transfer_read %[[arg2]][%[[c0]], %[[c0]]], %[[cst]] {in_bounds = [true, true]}
+// CHECK:      %[[transpose:.*]] = vector.transpose %[[read1]], [2, 1, 0, 3] : vector<16x16x32x2xbf16> to vector<32x16x16x2xbf16>
+// CHECK:      %[[alloca:.*]] = memref.alloca() : memref<32x16x16x2xbf16>
+// CHECK:      vector.transfer_write %[[read3]], %alloca[%[[c0]], %[[c0]], %[[c0]], %[[c0]]] {in_bounds = [true, true, true, true]}
+// CHECK:      %[[read4:.*]] = vector.transfer_read %[[alloca]][%[[c0]], %[[c0]], %[[c0]], %[[c0]]], %[[cst]] {in_bounds = [true, true, true, true]}
+// CHECK:      %[[read5:.*]] = vector.contract {indexing_maps = [#map, #map1, #map2], iterator_types = ["reduction", "reduction", "parallel", "parallel", "reduction"], kind = #vector.kind<add>} %[[read4]], %[[read0]], %[[read2]]
+// CHECK:    vector.transfer_write %[[read5]], %[[arg2]][%[[c0]], %[[c0]]] {in_bounds = [true, true]}
