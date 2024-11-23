@@ -23,7 +23,7 @@
 #include "TPP/Dialect/Xsmm/XsmmDialect.h"
 #include "TPP/PassUtils.h"
 #include "mlir/Transforms/Passes.h"
-
+#include <iostream>
 using namespace mlir;
 using namespace mlir::tpp;
 
@@ -72,9 +72,10 @@ private:
     // List of operations to skip when lowering Linalg to XSMM
     // This allows further passes to lower to vector, function, codegen
     // Default is to not skip anything
-    LinalgLoweringOptions linalgOptions;
-    if (linalgToVector)
-      linalgOptions.skipOperations = {"all"};
+    LinalgLoweringOptions *linalgOptions = new LinalgLoweringOptions();
+    if (linalgToVector) {
+      linalgOptions = new LinalgLoweringOptions{{"all"}};
+    }
 
     pm.addPass(createFoldAddIntoDest());
     if (linalgToLoops) {
@@ -109,7 +110,7 @@ private:
       pm.addPass(createBufferize());
 
       // Lower Linalg to XSMM.
-      pm.addNestedPass<func::FuncOp>(createLinalgLowering(linalgOptions));
+      pm.addNestedPass<func::FuncOp>(createLinalgLowering(*linalgOptions));
 
       if (linalgToVector) {
         // Vectorizes the remaining Linalg operations
@@ -155,6 +156,9 @@ private:
 
     // Clean up after the default pipeline.
     pm.addNestedPass<func::FuncOp>(createPostprocessing());
+    if (linalgOptions != nullptr) {
+      free(linalgOptions);
+    }
   }
 };
 

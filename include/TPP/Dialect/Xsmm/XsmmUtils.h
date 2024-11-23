@@ -129,10 +129,9 @@ SmallVector<Type> extractInvokeOperandTypes(OpBuilder &builder,
 SmallVector<Value> getOperands(OpBuilder &builder, Location loc,
                                ValueRange operands, IntegerAttr dataTypeAttr);
 
-FailureOr<vector::ContractionOp>
-makeMinorDimensionsInnerMost(RewriterBase &rewriter,
-                             vector::ContractionOp contractOp, unsigned m,
-                             unsigned n, unsigned k, xsmm::DataTypeAttr type);
+FailureOr<vector::ContractionOp> makeMinorDimensionsInnerMost(
+    RewriterBase &rewriter, vector::ContractionOp contractOp, unsigned m,
+    unsigned n, unsigned k, unsigned innerDim, xsmm::DataTypeAttr type);
 
 std::optional<unsigned>
 getPosInCodomain(unsigned dim, vector::ContractionOp contractOp, AffineMap map);

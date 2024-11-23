@@ -362,13 +362,25 @@ struct ConvertTranspose
           }
 
           unsigned k;
+          unsigned innermostDim;
           if (lastDim != -1 && isVnni &&
               (vecLen * (1 - operandIndex) + operandIndex - 1) == lastDim) {
             k = contractionDims->k[prevIndex];
+            if (operandIndex == 0) {
+              innermostDim = contractionDims->k[prevIndex];
+            } else {
+              innermostDim = contractionDims->k[index];
+            }
           } else if (lastDim != -1 && !isVnni) {
             k = contractionDims->k[index];
+            if (operandIndex == 0) {
+              innermostDim = contractionDims->k[prevIndex];
+            } else {
+              innermostDim = contractionDims->k[index];
+            }
           } else {
             k = contractionDims->k[index];
+            innermostDim = k;
           }
           auto dtype = xsmm::utils::getDataType(
               rewriter, contractOp->getOperand(0).getType());
@@ -379,7 +391,7 @@ struct ConvertTranspose
             // n, k) are not unit strides. Inject transposes to bring them
             // innermost.
             if (failed(xsmm::utils::makeMinorDimensionsInnerMost(
-                    rewriter, contractOp, m, n, k, dtype))) {
+                    rewriter, contractOp, m, n, k, innermostDim, dtype))) {
               return WalkResult::interrupt();
             }
           }

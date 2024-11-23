@@ -87,7 +87,6 @@ static bool isInnerMostDim(Value operand, unsigned minorDim,
                            bool isVnni) {
   auto shapedType = cast<VectorType>(operand.getType());
   int64_t rank = shapedType.getRank();
-
   if (isVnni && operandNumber == 1) {
     return minorDim == rank - 2;
   }
@@ -680,13 +679,37 @@ FailureOr<int64_t> getLeadingDim(Type type, size_t pos) {
   return strides[pos];
 }
 
-// Emit a transpose operation for `operand` by swapping `dim` with `newDim`.
+static AffineMap emitTransposeMap(RewriterBase &rewriter,
+                                  vector::ContractionOp contractOp,
+                                  ShapedType operandType, unsigned dim,
+                                  unsigned newDim, int operandNumber) {
+
+  auto rank = operandType.getRank();
+  SmallVector<int64_t> permutation;
+  for (int i = 0; i < rank; i++) {
+    permutation.push_back(i);
+  }
+  permutation[newDim] = dim;
+  permutation[dim] = newDim;
+  assert(isPermutationVector(permutation));
+  auto map = AffineMap::getPermutationMap(permutation, rewriter.getContext());
+  map.dump();
+  int mapDims = map.getNumDims();
+  map = map.shiftDims(
+      contractOp.getIndexingMapsArray()[operandNumber].getNumResults() -
+      mapDims);
+  map.dump();
+  map = map.compose(contractOp.getIndexingMapsArray()[operandNumber]);
+  map.dump();
+  return map;
+}
+
 // Emit a transpose operation for `operand` by swapping the dimensions at index
 // `dim` with `newDim`.
-static void emitTransposeOnOperand(RewriterBase &rewriter,
-                                   vector::ContractionOp contractOp,
-                                   Value operand, unsigned dim, unsigned newDim,
-                                   int operandNumber) {
+static Value emitTransposeOnOperand(RewriterBase &rewriter,
+                                    vector::ContractionOp contractOp,
+                                    Value operand, unsigned dim,
+                                    unsigned newDim) {
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPoint(contractOp);
   Location loc = contractOp.getLoc();
@@ -717,37 +740,24 @@ static void emitTransposeOnOperand(RewriterBase &rewriter,
   auto transferWrite = rewriter.create<vector::TransferWriteOp>(
       operand.getLoc(), transposeResult->getResult(0), memref, indices);
 
-  SmallVector<AffineMap> transposeIndexingMaps =
-      contractOp.getIndexingMapsArray();
-
   rewriter.setInsertionPoint(contractOp);
 
   Value transferRead = rewriter.create<vector::TransferReadOp>(
       operand.getLoc(), vectorType, memref, indices);
 
-  contractOp->setOperand(operandNumber, transferRead);
-
-  auto map = AffineMap::getPermutationMap(permutation, rewriter.getContext());
-  map = map.compose(contractOp.getIndexingMapsArray()[operandNumber]);
-
-  transposeIndexingMaps[operandNumber] = map;
-  rewriter.modifyOpInPlace(contractOp, [&]() {
-    contractOp.setIndexingMapsAttr(ArrayAttr::get(
-        contractOp.getContext(),
-        llvm::to_vector(llvm::map_range(transposeIndexingMaps,
-                                        [](AffineMap map) -> Attribute {
-                                          return AffineMapAttr::get(map);
-                                        }))));
-  });
+  return transferRead;
 }
 
-FailureOr<vector::ContractionOp>
-makeMinorDimensionsInnerMost(RewriterBase &rewriter,
-                             vector::ContractionOp contractOp, unsigned m,
-                             unsigned n, unsigned k, xsmm::DataTypeAttr type) {
+FailureOr<vector::ContractionOp> makeMinorDimensionsInnerMost(
+    RewriterBase &rewriter, vector::ContractionOp contractOp, unsigned m,
+    unsigned n, unsigned k, unsigned innerDim, xsmm::DataTypeAttr type) {
   OpOperand *operandA = &contractOp->getOpOperand(0);
   OpOperand *operandB = &contractOp->getOpOperand(1);
   OpOperand &operandC = contractOp->getOpOperand(2);
+
+  Value operandOne = operandA->get();
+  Value operandTwo = operandB->get();
+  Value operandThree = operandC.get();
 
   // C(m,n) += A(m,k) * B(k,n)
   // n is expected to be the innermost for C
@@ -757,7 +767,10 @@ makeMinorDimensionsInnerMost(RewriterBase &rewriter,
       k, contractOp, contractOp.getIndexingMapsArray()[0]);
   auto minorMInCodomainOpA = xsmm::utils::getPosInCodomain(
       m, contractOp, contractOp.getIndexingMapsArray()[0]);
-  if (!minorKInCodomainOpA || !minorMInCodomainOpA) {
+  auto minorInnerDimA = xsmm::utils::getPosInCodomain(
+      innerDim, contractOp, contractOp.getIndexingMapsArray()[0]);
+
+  if (!minorKInCodomainOpA || !minorMInCodomainOpA || !minorInnerDimA) {
     LLVM_DEBUG(
         llvm::dbgs()
         << "[makeMinorDimensionsInnerMost] did not find minor dims for A\n");
@@ -767,7 +780,10 @@ makeMinorDimensionsInnerMost(RewriterBase &rewriter,
       n, contractOp, contractOp.getIndexingMapsArray()[1]);
   auto minorKInCodomainOpB = xsmm::utils::getPosInCodomain(
       k, contractOp, contractOp.getIndexingMapsArray()[1]);
-  if (!minorNInCodomainOpB || !minorKInCodomainOpB) {
+  auto minorInnerDimB = xsmm::utils::getPosInCodomain(
+      innerDim, contractOp, contractOp.getIndexingMapsArray()[1]);
+
+  if (!minorNInCodomainOpB || !minorKInCodomainOpB || !minorInnerDimB) {
     LLVM_DEBUG(
         llvm::dbgs()
         << "[makeMinorDimensionsInnerMost] did not find minor dims for B\n");
@@ -792,62 +808,129 @@ makeMinorDimensionsInnerMost(RewriterBase &rewriter,
     vnniFactor = *vnniBlockingFactor;
     isVnni = succeeded(vnni::utils::isInVnniLayout(contractOp, vnniFactor));
   }
-  if (!isInnerMostDim(operandC.get(), *minorNInCodomainOpC, contractOp, type, 2,
+  if (!isInnerMostDim(operandThree, *minorNInCodomainOpC, contractOp, type, 2,
                       isVnni)) {
     LLVM_DEBUG(llvm::dbgs()
                << "[makeMinorDimensionsInnerMost] emit transpose for C\n");
-    if (isInnerMostDim(operandC.get(), *minorMInCodomainOpC, contractOp, type,
-                       2, isVnni)) {
-      if (isInnerMostDim(operandA->get(), *minorKInCodomainOpA, contractOp,
-                         type, 0, isVnni)) {
-        emitTransposeOnOperand(rewriter, contractOp, operandA->get(),
-                               *minorKInCodomainOpA, *minorMInCodomainOpA, 0);
+    if (isInnerMostDim(operandThree, *minorMInCodomainOpC, contractOp, type, 2,
+                       isVnni)) {
+      AffineMap zeroth = contractOp.getIndexingMapsArray()[0];
+      AffineMap first = contractOp.getIndexingMapsArray()[1];
+      if (isInnerMostDim(operandOne, *minorInnerDimA, contractOp, type, 0,
+                         isVnni)) {
+        LLVM_DEBUG(llvm::dbgs()
+                   << "[makeMinorDimensionsInnerMost] emit transpose for A\n");
+        auto minorInner = *minorInnerDimA;
+        if (isVnni) {
+          minorInner = minorInner - 1;
+        }
+        contractOp->setOperand(1, emitTransposeOnOperand(rewriter, contractOp,
+                                                         operandOne, minorInner,
+                                                         *minorMInCodomainOpA));
+        contractOp->setOperand(0, operandTwo);
+        zeroth = emitTransposeMap(rewriter, contractOp,
+                                  dyn_cast<ShapedType>(operandOne.getType()),
+                                  minorInner, *minorMInCodomainOpA, 0);
       }
-      if (isInnerMostDim(operandB->get(), *minorNInCodomainOpB, contractOp,
-                         type, 1, isVnni)) {
-        emitTransposeOnOperand(rewriter, contractOp, operandB->get(),
-                               *minorNInCodomainOpB, *minorKInCodomainOpB, 1);
+      if (isInnerMostDim(operandTwo, *minorNInCodomainOpB, contractOp, type, 1,
+                         isVnni)) {
+        LLVM_DEBUG(llvm::dbgs()
+                   << "[makeMinorDimensionsInnerMost] emit transpose for B\n");
+        operandOne = contractOp->getOperand(0);
+        auto minorK = *minorInnerDimB;
+        if (isVnni) {
+          minorK = minorK - 2;
+        }
+        contractOp->setOperand(
+            0, emitTransposeOnOperand(rewriter, contractOp, operandTwo,
+                                      *minorNInCodomainOpB, minorK));
+        contractOp->setOperand(1, operandOne);
+        first = emitTransposeMap(rewriter, contractOp,
+                                 dyn_cast<ShapedType>(operandTwo.getType()),
+                                 *minorNInCodomainOpB, minorK, 1);
       }
+
       // Avoid transpose on the output by swapping A and B.
-      OpOperand *operandA = &contractOp->getOpOperand(0);
-      OpOperand *operandB = &contractOp->getOpOperand(1);
-      SmallVector<AffineMap> indexingMaps = contractOp.getIndexingMapsArray();
-      std::swap(indexingMaps[0], indexingMaps[1]);
+      // SmallVector<AffineMap> indexingMaps =
+      // contractOp.getIndexingMapsArray(); std::swap(indexingMaps[0],
+      // indexingMaps[1]);
+      SmallVector<AffineMap> transposeIndexingMaps =
+          contractOp.getIndexingMapsArray();
+      transposeIndexingMaps[1] = zeroth;
+      transposeIndexingMaps[0] = first;
       rewriter.modifyOpInPlace(contractOp, [&]() {
-        Value operandATmp = operandA->get();
-        contractOp->setOperand(0, operandB->get());
-        contractOp->setOperand(1, operandATmp);
-        contractOp.setIndexingMapsAttr(
-            ArrayAttr::get(contractOp.getContext(),
-                           llvm::to_vector(llvm::map_range(
-                               indexingMaps, [](AffineMap map) -> Attribute {
-                                 return AffineMapAttr::get(map);
-                               }))));
+        contractOp.setIndexingMapsAttr(ArrayAttr::get(
+            contractOp.getContext(),
+            llvm::to_vector(llvm::map_range(transposeIndexingMaps,
+                                            [](AffineMap map) -> Attribute {
+                                              return AffineMapAttr::get(map);
+                                            }))));
       });
+
       return contractOp;
     }
   }
-  if (!isInnerMostDim(operandB->get(), *minorNInCodomainOpB, contractOp, type,
-                      1, isVnni)) {
-    if (isInnerMostDim(operandB->get(), *minorKInCodomainOpB, contractOp, type,
-                       1, isVnni)) {
+  if (!isInnerMostDim(operandTwo, *minorNInCodomainOpB, contractOp, type, 1,
+                      isVnni)) {
+    if (isInnerMostDim(operandTwo, *minorInnerDimB, contractOp, type, 1,
+                       isVnni)) {
       LLVM_DEBUG(llvm::dbgs()
                  << "[makeMinorDimensionsInnerMost] emit transpose for B\n");
+      auto minorK = *minorInnerDimB;
+      if (isVnni) {
+        minorK = minorK - 2;
+      }
+      contractOp->setOperand(
+          1, emitTransposeOnOperand(rewriter, contractOp, operandTwo,
+                                    *minorNInCodomainOpB, minorK));
 
-      emitTransposeOnOperand(rewriter, contractOp, operandB->get(),
-                             *minorKInCodomainOpB, *minorNInCodomainOpB, 1);
+      auto map = emitTransposeMap(rewriter, contractOp,
+                                  dyn_cast<ShapedType>(operandTwo.getType()),
+                                  *minorNInCodomainOpB, minorK, 1);
+
+      SmallVector<AffineMap> transposeIndexingMaps =
+          contractOp.getIndexingMapsArray();
+      transposeIndexingMaps[1] = map;
+      rewriter.modifyOpInPlace(contractOp, [&]() {
+        contractOp.setIndexingMapsAttr(ArrayAttr::get(
+            contractOp.getContext(),
+            llvm::to_vector(llvm::map_range(transposeIndexingMaps,
+                                            [](AffineMap map) -> Attribute {
+                                              return AffineMapAttr::get(map);
+                                            }))));
+      });
     }
   }
 
-  if (!isInnerMostDim(operandA->get(), *minorKInCodomainOpA, contractOp, type,
-                      0, isVnni)) {
-    if (isInnerMostDim(operandA->get(), *minorMInCodomainOpA, contractOp, type,
-                       0, isVnni)) {
+  if (!isInnerMostDim(operandOne, *minorInnerDimA, contractOp, type, 0,
+                      isVnni)) {
+    if (isInnerMostDim(operandOne, *minorMInCodomainOpA, contractOp, type, 0,
+                       isVnni)) {
       LLVM_DEBUG(llvm::dbgs()
                  << "[makeMinorDimensionsInnerMost] emit transpose for A\n");
+      auto minorInner = *minorInnerDimA;
+      if (isVnni) {
+        minorInner = minorInner - 1;
+      }
 
-      emitTransposeOnOperand(rewriter, contractOp, operandA->get(),
-                             *minorKInCodomainOpA, *minorMInCodomainOpA, 0);
+      contractOp->setOperand(0, emitTransposeOnOperand(rewriter, contractOp,
+                                                       operandOne, minorInner,
+                                                       *minorMInCodomainOpA));
+      auto map = emitTransposeMap(rewriter, contractOp,
+                                  dyn_cast<ShapedType>(operandOne.getType()),
+                                  minorInner, *minorMInCodomainOpA, 0);
+
+      SmallVector<AffineMap> transposeIndexingMaps =
+          contractOp.getIndexingMapsArray();
+      transposeIndexingMaps[0] = map;
+      rewriter.modifyOpInPlace(contractOp, [&]() {
+        contractOp.setIndexingMapsAttr(ArrayAttr::get(
+            contractOp.getContext(),
+            llvm::to_vector(llvm::map_range(transposeIndexingMaps,
+                                            [](AffineMap map) -> Attribute {
+                                              return AffineMapAttr::get(map);
+                                            }))));
+      });
     }
   }
   return contractOp;
@@ -1013,10 +1096,12 @@ FailureOr<FusedMatch> getFusedBrgemmSequenceFromProducer(Operation *op) {
       continue;
     }
 
-    // Make sure this is a chain, ie. at least once in inputs and outputs
+    // Make sure this is a chain, ie. at least once in inputs and
+    // outputs
     int numUses = std::count(user->getOperands().begin(),
                              user->getOperands().end(), op->getResult(0));
-    // At least one input and the last operand (output) is the same buffer
+    // At least one input and the last operand (output) is the same
+    // buffer
     if (((dyn_cast<xsmm::UnaryOp>(user) &&
           dyn_cast<xsmm::UnaryOp>(user).getCallee() != UnaryKind::ZERO) &&
          numUses < 2) ||
