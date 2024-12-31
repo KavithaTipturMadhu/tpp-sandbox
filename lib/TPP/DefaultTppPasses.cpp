@@ -97,6 +97,8 @@ private:
       skipOperations.push_back("unary");
       skipOperations.push_back("transpose");
       skipOperations.push_back("vnni");
+      skipOperations.push_back("gemm");
+      skipOperations.push_back("brgemm");
     }
 
     // Pipeline building starts here.
